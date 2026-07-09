@@ -79,3 +79,71 @@ When it receives raw plain-text payload e.g. `75,98`:
 2. Evaluates the health status (`Normal` or `Warning` if BPM is outside 60-100 or SPO2 < 95%).
 3. Upserts and saves the data inside MongoDB under an **Hourly Bucket Pattern** (`{mac_address}_{date}_{hour}`).
 4. Emulates Realtime Database updates to Firebase RTDB at `/live_devices/{mac}/current`.
+
+---
+
+## 🔥 Real Firebase Admin SDK Setup Guide
+
+For local testing, the backend emulates Firebase RTDB updates via stdout logs. To connect to a real Firebase Realtime Database using the official Go Admin SDK, follow these steps:
+
+### 1. Generate Firebase Service Account Key
+1. Open the [Firebase Console](https://console.firebase.google.com/).
+2. Select your project, and navigate to **Project Settings ➔ Service Accounts**.
+3. Under **Firebase Admin SDK**, click **Generate New Private Key**.
+4. Save the downloaded JSON file as `service-account.json` in the root directory of this backend.
+
+### 2. Add Firebase Admin Go SDK Dependency
+In your project directory, run:
+```bash
+go get firebase.google.com/go/v4
+```
+
+### 3. Initialize Firebase in Code
+You can replace the simulated functions in `device_handler.go` and `mqtt_worker.go` with actual calls using this initialization block in `main.go`:
+
+```go
+import (
+	"context"
+	firebase "firebase.google.com/go/v4"
+	"google.golang.org/api/option"
+)
+
+var firebaseApp *firebase.App
+
+func InitFirebase() {
+	opt := option.WithCredentialsFile("service-account.json")
+	config := &firebase.Config{
+		DatabaseURL: "https://<YOUR_PROJECT_ID>-default-rtdb.firebaseio.com/",
+	}
+	app, err := firebase.NewApp(context.Background(), config, opt)
+	if err != nil {
+		log.Fatalf("Error initializing Firebase App: %v", err)
+	}
+	firebaseApp = app
+}
+```
+
+### 4. Write to Realtime Database
+Get a client reference and write values asynchronously:
+```go
+func UpdateFirebaseLive(mac string, bpm, spo2 int, status string) {
+	ctx := context.Background()
+	client, err := firebaseApp.Database(ctx)
+	if err != nil {
+		log.Printf("Firebase DB client error: %v", err)
+		return
+	}
+	
+	ref := client.NewRef(fmt.Sprintf("devices/%s/latest", mac))
+	data := map[string]interface{}{
+		"bpm":        bpm,
+		"spo2":       spo2,
+		"status":     status,
+		"updated_at": time.Now().Unix(),
+	}
+	
+	if err := ref.Set(ctx, data); err != nil {
+		log.Printf("Error updating Firebase: %v", err)
+	}
+}
+```
