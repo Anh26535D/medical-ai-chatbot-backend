@@ -12,7 +12,7 @@ import (
 
 // Fake Firebase RTDB live updates
 func FakeFirebaseLiveUpdate(mac string, bpm, spo2 int, status string) error {
-	log.Printf("[Firebase Simulation] Writing to RTDB /live_devices/%s/current: bpm=%d, spo2=%d, status=%s",
+	log.Printf("[Firebase Simulation] Writing to RTDB devices/%s/latest: bpm=%d, spo2=%d, status=%s",
 		mac, bpm, spo2, status)
 	return nil
 }
