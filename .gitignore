@@ -1,0 +1,15 @@
+# Go binaries
+medical-iot-backend
+*.exe
+*.test
+*.out
+
+# Local development logs and configs
+.idea/
+.vscode/
+*.log
+
+# Docker database volumes (if mounted locally)
+mongo_data/
+redis_data/
+emqx_data/
