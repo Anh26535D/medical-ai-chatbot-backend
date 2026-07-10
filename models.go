@@ -22,10 +22,12 @@ type Device struct {
 
 // TelemetryDataPoint represents a single health reading
 type TelemetryDataPoint struct {
-	Timestamp int64  `bson:"t" json:"t"`
-	BPM       int    `bson:"bpm" json:"bpm"`
-	SPO2      int    `bson:"spo2" json:"spo2"`
-	Status    string `bson:"status" json:"status"`
+	Timestamp   int64   `bson:"t" json:"t"`
+	BPM         int     `bson:"bpm" json:"bpm"`
+	SPO2        int     `bson:"spo2" json:"spo2"`
+	Temperature float64 `bson:"temp" json:"temp"`
+	Humidity    float64 `bson:"hum" json:"hum"`
+	Status      string  `bson:"status" json:"status"`
 }
 
 // TelemetryHistory represents hourly bucket pattern in MongoDB

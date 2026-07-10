@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"math/big"
 	"net/http"
@@ -49,11 +51,13 @@ func ComputePinPopSignature(userCode, macAddress, sessionId string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// Emulate Firebase provisioning updates
-func FakeFirebaseProvisioningUpdate(mac, sessionId, userCode, deviceCode string) error {
-	log.Printf("[Firebase Simulation] Writing to RTDB /provisioning_polling/%s_%s: UserCode=%s, DeviceCode=%s",
-		mac, sessionId, userCode, deviceCode)
-	return nil
+// Cập nhật trạng thái Provisioning thật lên Firebase Realtime Database qua REST API Client
+func UpdateRealFirebaseProvisioning(ctx context.Context, mac, sessionId, userCode, deviceCode string) error {
+	if Firebase != nil {
+		return Firebase.UpdateProvisioningStatus(ctx, mac, sessionId, userCode, deviceCode)
+	}
+	log.Printf("[Firebase WARNING] Firebase Client chưa được khởi tạo. Không thể ghi nhận trạng thái pairing!")
+	return fmt.Errorf("firebase client uninitialized")
 }
 
 func DeviceAuthorizeHandler(c *gin.Context) {
@@ -80,8 +84,11 @@ func DeviceAuthorizeHandler(c *gin.Context) {
 		return
 	}
 
-	// Fake Firebase update
-	_ = FakeFirebaseProvisioningUpdate(payload.MACAddress, payload.SessionID, userCode, deviceCode)
+	// Ghi nhận trạng thái thật lên Firebase phục vụ cơ chế polling phía App/Web frontend
+	if err := UpdateRealFirebaseProvisioning(c.Request.Context(), payload.MACAddress, payload.SessionID, userCode, deviceCode); err != nil {
+		log.Printf("[Firebase Error] Lỗi đồng bộ luồng pairing: %v", err)
+		// Không ngắt luồng HTTP nếu lưu database chính (Redis/Mongo) đã thành công
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"device_code":      deviceCode,

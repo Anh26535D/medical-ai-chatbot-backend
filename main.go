@@ -63,6 +63,9 @@ func main() {
 		MongoDbName: "medical_iot_db",
 	}
 
+	// Initialize Firebase Client
+	InitFirebase()
+
 	// 3. Start MQTT worker in background
 	mqttBroker := os.Getenv("MQTT_BROKER_URI")
 	if mqttBroker == "" {

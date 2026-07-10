@@ -10,17 +10,10 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
-// Fake Firebase RTDB live updates
-func FakeFirebaseLiveUpdate(mac string, bpm, spo2 int, status string) error {
-	log.Printf("[Firebase Simulation] Writing to RTDB devices/%s/latest: bpm=%d, spo2=%d, status=%s",
-		mac, bpm, spo2, status)
-	return nil
-}
-
-// Evaluate clinical status based on BPM and SPO2 thresholds
-func evaluateStatus(bpm, spo2 int) string {
-	// Normal resting heart rate: 60-100 bpm. Normal blood oxygen level: 95-100%.
-	if bpm < 60 || bpm > 100 || spo2 < 95 {
+// Evaluate clinical status based on BPM, SPO2, and Temperature thresholds
+func evaluateStatus(bpm, spo2 int, temp float64) string {
+	// Normal resting heart rate: 60-100 bpm. Normal blood oxygen level: 95-100%. Temp warning > 39.0°C.
+	if bpm < 60 || bpm > 100 || spo2 < 95 || temp > 39.0 {
 		return "Warning"
 	}
 	return "Normal"
@@ -75,28 +68,32 @@ func handleTelemetryMessage(ctx context.Context, msg mqtt.Message) {
 	}
 	mac := parts[1]
 
-	// Payload format: "bpm,spo2" (e.g., "75,98")
+	// Payload format: "bpm,spo2,temp,hum" (e.g., "75,98,32.5,65.0")
 	dataParts := strings.Split(payload, ",")
-	if len(dataParts) != 2 {
-		log.Printf("[MQTT Worker] Invalid payload format (expected bpm,spo2): %s", payload)
+	if len(dataParts) != 4 {
+		log.Printf("[MQTT Worker] Invalid payload format (expected bpm,spo2,temp,hum): %s", payload)
 		return
 	}
 
 	bpm, err1 := strconv.Atoi(strings.TrimSpace(dataParts[0]))
 	spo2, err2 := strconv.Atoi(strings.TrimSpace(dataParts[1]))
-	if err1 != nil || err2 != nil {
-		log.Printf("[MQTT Worker] Failed to parse integers from payload: %s", payload)
+	temp, err3 := strconv.ParseFloat(strings.TrimSpace(dataParts[2]), 64)
+	hum, err4 := strconv.ParseFloat(strings.TrimSpace(dataParts[3]), 64)
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil {
+		log.Printf("[MQTT Worker] Failed to parse values from payload: %s", payload)
 		return
 	}
 
-	status := evaluateStatus(bpm, spo2)
+	status := evaluateStatus(bpm, spo2, temp)
 	now := time.Now()
 
 	point := TelemetryDataPoint{
-		Timestamp: now.Unix(),
-		BPM:       bpm,
-		SPO2:      spo2,
-		Status:    status,
+		Timestamp:   now.Unix(),
+		BPM:         bpm,
+		SPO2:        spo2,
+		Temperature: temp,
+		Humidity:    hum,
+		Status:      status,
 	}
 
 	date := now.Format("2006-01-02")
@@ -110,6 +107,12 @@ func handleTelemetryMessage(ctx context.Context, msg mqtt.Message) {
 		log.Printf("[MQTT Worker] Saved telemetry data to MongoDB bucket for device %s", mac)
 	}
 
-	// Fake Firebase update
-	_ = FakeFirebaseLiveUpdate(mac, bpm, spo2, status)
+	// Update in Firebase Realtime Database
+	if Firebase != nil {
+		if err := Firebase.UpdateLiveTelemetry(ctx, mac, point); err != nil {
+			log.Printf("[MQTT Worker] Failed to update live telemetry in Firebase for device %s: %v", mac, err)
+		} else {
+			log.Printf("[MQTT Worker] Updated live telemetry in Firebase for device %s", mac)
+		}
+	}
 }
