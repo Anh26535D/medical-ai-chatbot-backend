@@ -106,3 +106,40 @@ For production environments, data is sent to the target node paths:
 - Telemetry Updates: `devices/{mac}/telemetry/latest.json`
 - Provisioning Flow Updates: `provisioning_polling/{mac}_{sessionId}.json`
 
+---
+
+## 🌐 Production Deployment Guide
+
+To deploy the application to a production Linux server (e.g., Ubuntu VPS), follow these steps:
+
+### 1. Prerequisites
+Ensure Docker and Docker Compose are installed on your server:
+```bash
+sudo apt update && sudo apt upgrade -y
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh get-docker.sh
+```
+
+### 2. Project Setup
+Clone the repository and set up your configurations:
+```bash
+git clone <your-repository-url>
+cd medical-ai-chatbot-backend
+cp .env.example .env
+nano .env # Configure Firebase parameters and system credentials
+```
+
+### 3. Start the Stack
+Boot up the backend along with MongoDB, Redis, and EMQX in detached background mode:
+```bash
+docker compose --env-file .env up -d --build
+```
+
+### 4. Firewall Settings
+Open the ports required for the API and telemetry ingestion:
+```bash
+sudo ufw allow 8080/tcp # HTTP REST API
+sudo ufw allow 1883/tcp # MQTT Telemetry Ingestion
+```
+
+
