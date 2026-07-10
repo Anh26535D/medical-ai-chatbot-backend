@@ -1,16 +1,16 @@
-package main
+package handler
 
 import (
 	"bytes"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"testing"
 	"time"
+
+	"medical-iot-backend/internal/model"
+	"medical-iot-backend/internal/repository"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -36,9 +36,9 @@ func SetupDeviceRouter() *gin.Engine {
 
 func TestAuthorize_Success(t *testing.T) {
 	mockDB := new(MockDatabase)
-	DB = mockDB
+	repository.DB = mockDB
 
-	payload := DeviceAuthorizePayload{
+	payload := model.DeviceAuthorizePayload{
 		MACAddress: "00:11:22:33:44:55",
 		SessionID:  "session-abc-123",
 	}
@@ -72,7 +72,7 @@ func TestAuthorize_Success(t *testing.T) {
 
 func TestConfirm_InvalidSignature(t *testing.T) {
 	mockDB := new(MockDatabase)
-	DB = mockDB
+	repository.DB = mockDB
 
 	// Generate a valid JWT
 	claims := &Claims{
@@ -84,7 +84,7 @@ func TestConfirm_InvalidSignature(t *testing.T) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	tokenString, _ := token.SignedString(JWTSecret)
 
-	payload := DeviceConfirmPayload{
+	payload := model.DeviceConfirmPayload{
 		UserCode:        "ABCD-1234",
 		MACAddress:      "00:11:22:33:44:55",
 		SessionID:       "session-abc-123",
@@ -107,7 +107,7 @@ func TestConfirm_InvalidSignature(t *testing.T) {
 
 func TestConfirm_Success(t *testing.T) {
 	mockDB := new(MockDatabase)
-	DB = mockDB
+	repository.DB = mockDB
 
 	claims := &Claims{
 		UIDUser: "user-123",
@@ -121,9 +121,9 @@ func TestConfirm_Success(t *testing.T) {
 	userCode := "ABCD-1234"
 	mac := "00:11:22:33:44:55"
 	sessionID := "session-abc-123"
-	validSig := testComputePinPopSignature(userCode, mac, sessionID)
+	validSig := ComputePinPopSignature(userCode, mac, sessionID)
 
-	payload := DeviceConfirmPayload{
+	payload := model.DeviceConfirmPayload{
 		UserCode:        userCode,
 		MACAddress:      mac,
 		SessionID:       sessionID,
@@ -131,7 +131,7 @@ func TestConfirm_Success(t *testing.T) {
 	}
 	body, _ := json.Marshal(payload)
 
-	session := &DeviceFlowSession{
+	session := &model.DeviceFlowSession{
 		DeviceCode: "devicecode1234567890123456789012",
 		MACAddress: mac,
 		UIDESP:     "esp-32-id",
@@ -140,7 +140,7 @@ func TestConfirm_Success(t *testing.T) {
 	}
 
 	mockDB.On("GetDeviceFlow", mock.Anything, userCode).Return(session, nil)
-	mockDB.On("SetDeviceFlow", mock.Anything, userCode, mock.MatchedBy(func(s *DeviceFlowSession) bool {
+	mockDB.On("SetDeviceFlow", mock.Anything, userCode, mock.MatchedBy(func(s *model.DeviceFlowSession) bool {
 		return s.Status == "approved" && s.MACAddress == mac && s.SessionID == sessionID
 	}), 300*time.Second).Return(nil)
 
@@ -160,16 +160,16 @@ func TestConfirm_Success(t *testing.T) {
 
 func TestToken_Pending(t *testing.T) {
 	mockDB := new(MockDatabase)
-	DB = mockDB
+	repository.DB = mockDB
 
-	payload := TokenExchangePayload{
+	payload := model.TokenExchangePayload{
 		DeviceCode: "devicecode1234567890123456789012",
 		MACAddress: "00:11:22:33:44:55",
 	}
 	body, _ := json.Marshal(payload)
 
 	userCode := "ABCD-1234"
-	session := &DeviceFlowSession{
+	session := &model.DeviceFlowSession{
 		DeviceCode: payload.DeviceCode,
 		MACAddress: payload.MACAddress,
 		UIDESP:     "esp-32-id",
@@ -194,16 +194,16 @@ func TestToken_Pending(t *testing.T) {
 
 func TestToken_Success(t *testing.T) {
 	mockDB := new(MockDatabase)
-	DB = mockDB
+	repository.DB = mockDB
 
-	payload := TokenExchangePayload{
+	payload := model.TokenExchangePayload{
 		DeviceCode: "devicecode1234567890123456789012",
 		MACAddress: "00:11:22:33:44:55",
 	}
 	body, _ := json.Marshal(payload)
 
 	userCode := "ABCD-1234"
-	session := &DeviceFlowSession{
+	session := &model.DeviceFlowSession{
 		DeviceCode: payload.DeviceCode,
 		MACAddress: payload.MACAddress,
 		UIDESP:     "esp-32-id",
@@ -213,7 +213,7 @@ func TestToken_Success(t *testing.T) {
 	}
 
 	mockDB.On("FindDeviceFlowByDeviceCode", mock.Anything, payload.DeviceCode).Return(userCode, session, nil)
-	mockDB.On("SaveDevice", mock.Anything, mock.MatchedBy(func(d *Device) bool {
+	mockDB.On("SaveDevice", mock.Anything, mock.MatchedBy(func(d *model.Device) bool {
 		return d.ID == payload.MACAddress && d.OwnerUID == "user-123" && d.AccessToken != ""
 	})).Return(nil)
 	mockDB.On("DeleteDeviceFlow", mock.Anything, userCode).Return(nil)

@@ -1,4 +1,4 @@
-package main
+package worker
 
 import (
 	"context"
@@ -7,6 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"medical-iot-backend/internal/model"
+	"medical-iot-backend/internal/repository"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -25,6 +29,39 @@ func (m *mockMQTTMessage) Topic() string     { return m.topic }
 func (m *mockMQTTMessage) MessageID() uint16 { return 0 }
 func (m *mockMQTTMessage) Payload() []byte   { return m.payload }
 func (m *mockMQTTMessage) Ack()              {}
+
+type MockDatabase struct {
+	mock.Mock
+}
+
+func (m *MockDatabase) FindUserByPhone(ctx context.Context, phone string) (*model.User, error) {
+	return nil, nil
+}
+func (m *MockDatabase) CreateUser(ctx context.Context, user *model.User) error {
+	return nil
+}
+func (m *MockDatabase) SaveDevice(ctx context.Context, device *model.Device) error {
+	return nil
+}
+func (m *MockDatabase) GetDevice(ctx context.Context, mac string) (*model.Device, error) {
+	return nil, nil
+}
+func (m *MockDatabase) UpdateTelemetryHistory(ctx context.Context, mac string, date string, hour int, point model.TelemetryDataPoint) error {
+	args := m.Called(ctx, mac, date, hour, point)
+	return args.Error(0)
+}
+func (m *MockDatabase) SetDeviceFlow(ctx context.Context, userCode string, session *model.DeviceFlowSession, ttl time.Duration) error {
+	return nil
+}
+func (m *MockDatabase) GetDeviceFlow(ctx context.Context, userCode string) (*model.DeviceFlowSession, error) {
+	return nil, nil
+}
+func (m *MockDatabase) DeleteDeviceFlow(ctx context.Context, userCode string) error {
+	return nil
+}
+func (m *MockDatabase) FindDeviceFlowByDeviceCode(ctx context.Context, deviceCode string) (string, *model.DeviceFlowSession, error) {
+	return "", nil, nil
+}
 
 func TestEvaluateStatus(t *testing.T) {
 	tests := []struct {
@@ -54,19 +91,19 @@ func TestEvaluateStatus(t *testing.T) {
 func TestHandleTelemetryMessage_Success(t *testing.T) {
 	// 1. Setup mock database
 	mockDB := new(MockDatabase)
-	DB = mockDB
+	repository.DB = mockDB
 
 	mac := "00:11:22:33:44:55"
 	topic := "devices/" + mac + "/telemetry"
 	payload := "75,98,36.5,65.0"
 
 	// Expect DB call
-	mockDB.On("UpdateTelemetryHistory", mock.Anything, mac, mock.Anything, mock.Anything, mock.MatchedBy(func(p TelemetryDataPoint) bool {
+	mockDB.On("UpdateTelemetryHistory", mock.Anything, mac, mock.Anything, mock.Anything, mock.MatchedBy(func(p model.TelemetryDataPoint) bool {
 		return p.BPM == 75 && p.SPO2 == 98 && p.Temperature == 36.5 && p.Humidity == 65.0 && p.Status == "Normal"
 	})).Return(nil)
 
 	// 2. Setup mock Firebase HTTP server
-	var firebaseReceivedPayload TelemetryDataPoint
+	var firebaseReceivedPayload model.TelemetryDataPoint
 	var firebaseReceivedURL string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		firebaseReceivedURL = r.URL.Path
@@ -77,7 +114,7 @@ func TestHandleTelemetryMessage_Success(t *testing.T) {
 	defer server.Close()
 
 	// Initialize Firebase global variable with the mock server URL
-	Firebase = &FirebaseClient{
+	repository.Firebase = &repository.FirebaseClient{
 		DatabaseURL: server.URL,
 		HTTPClient:  server.Client(),
 	}
@@ -101,7 +138,7 @@ func TestHandleTelemetryMessage_Success(t *testing.T) {
 
 func TestHandleTelemetryMessage_InvalidPayload(t *testing.T) {
 	mockDB := new(MockDatabase)
-	DB = mockDB
+	repository.DB = mockDB
 
 	// Invalid payloads should not call DB or Firebase
 	invalidPayloads := []string{

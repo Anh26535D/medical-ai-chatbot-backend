@@ -1,4 +1,4 @@
-package main
+package repository
 
 import (
 	"bytes"
@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"medical-iot-backend/internal/model"
 )
 
 // FirebaseClient handles updating the Firebase Realtime Database.
@@ -37,7 +39,7 @@ func InitFirebase() {
 }
 
 // UpdateLiveTelemetry updates the latest telemetry data for a device at devices/{mac}/telemetry/latest.
-func (fc *FirebaseClient) UpdateLiveTelemetry(ctx context.Context, mac string, point TelemetryDataPoint) error {
+func (fc *FirebaseClient) UpdateLiveTelemetry(ctx context.Context, mac string, point model.TelemetryDataPoint) error {
 	if fc == nil || fc.DatabaseURL == "" {
 		return fmt.Errorf("firebase client not initialized")
 	}

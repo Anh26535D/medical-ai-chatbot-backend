@@ -7,6 +7,10 @@ import (
 	"os"
 	"time"
 
+	"medical-iot-backend/internal/handler"
+	"medical-iot-backend/internal/repository"
+	"medical-iot-backend/internal/worker"
+
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -57,14 +61,14 @@ func main() {
 	}
 
 	// Set global Database instance
-	DB = &RealDatabase{
+	repository.DB = &repository.RealDatabase{
 		MongoClient: mongoClient,
 		RedisClient: redisClient,
 		MongoDbName: "medical_iot_db",
 	}
 
 	// Initialize Firebase Client
-	InitFirebase()
+	repository.InitFirebase()
 
 	// 3. Start MQTT worker in background
 	mqttBroker := os.Getenv("MQTT_BROKER_URI")
@@ -75,7 +79,7 @@ func main() {
 	defer workerCancel()
 
 	log.Printf("Starting MQTT Worker subscribing to %s...", mqttBroker)
-	StartMQTTWorker(workerCtx, mqttBroker)
+	worker.StartMQTTWorker(workerCtx, mqttBroker)
 
 	// 4. Configure HTTP Gin Engine
 	ginMode := os.Getenv("GIN_MODE")
@@ -95,16 +99,16 @@ func main() {
 		// Authentication Routes
 		auth := v1.Group("/auth")
 		{
-			auth.POST("/register", RegisterHandler)
-			auth.POST("/login", LoginHandler)
+			auth.POST("/register", handler.RegisterHandler)
+			auth.POST("/login", handler.LoginHandler)
 		}
 
 		// Device Flow (RFC 8628) Routes
 		oauth := v1.Group("/oauth")
 		{
-			oauth.POST("/device/authorize", DeviceAuthorizeHandler)
-			oauth.POST("/device/confirm", DeviceConfirmHandler)
-			oauth.POST("/token", DeviceTokenHandler)
+			oauth.POST("/device/authorize", handler.DeviceAuthorizeHandler)
+			oauth.POST("/device/confirm", handler.DeviceConfirmHandler)
+			oauth.POST("/token", handler.DeviceTokenHandler)
 		}
 	}
 

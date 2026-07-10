@@ -1,8 +1,10 @@
-package main
+package repository
 
 import (
 	"context"
 	"testing"
+
+	"medical-iot-backend/internal/model"
 
 	"github.com/stretchr/testify/assert"
 	"go.mongodb.org/mongo-driver/bson"
@@ -21,7 +23,7 @@ func TestUpdateTelemetryHistory(t *testing.T) {
 
 		mt.AddMockResponses(mtest.CreateSuccessResponse())
 
-		point := TelemetryDataPoint{
+		point := model.TelemetryDataPoint{
 			Timestamp:   1700000000,
 			BPM:         75,
 			SPO2:        98,

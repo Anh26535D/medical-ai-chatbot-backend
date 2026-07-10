@@ -1,4 +1,4 @@
-package main
+package handler
 
 import (
 	"bytes"
@@ -8,6 +8,9 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"medical-iot-backend/internal/model"
+	"medical-iot-backend/internal/repository"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -20,48 +23,48 @@ type MockDatabase struct {
 	mock.Mock
 }
 
-func (m *MockDatabase) FindUserByPhone(ctx context.Context, phone string) (*User, error) {
+func (m *MockDatabase) FindUserByPhone(ctx context.Context, phone string) (*model.User, error) {
 	args := m.Called(ctx, phone)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
-	return args.Get(0).(*User), args.Error(1)
+	return args.Get(0).(*model.User), args.Error(1)
 }
 
-func (m *MockDatabase) CreateUser(ctx context.Context, user *User) error {
+func (m *MockDatabase) CreateUser(ctx context.Context, user *model.User) error {
 	args := m.Called(ctx, user)
 	return args.Error(0)
 }
 
-func (m *MockDatabase) SaveDevice(ctx context.Context, device *Device) error {
+func (m *MockDatabase) SaveDevice(ctx context.Context, device *model.Device) error {
 	args := m.Called(ctx, device)
 	return args.Error(0)
 }
 
-func (m *MockDatabase) GetDevice(ctx context.Context, mac string) (*Device, error) {
+func (m *MockDatabase) GetDevice(ctx context.Context, mac string) (*model.Device, error) {
 	args := m.Called(ctx, mac)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
-	return args.Get(0).(*Device), args.Error(1)
+	return args.Get(0).(*model.Device), args.Error(1)
 }
 
-func (m *MockDatabase) UpdateTelemetryHistory(ctx context.Context, mac string, date string, hour int, point TelemetryDataPoint) error {
+func (m *MockDatabase) UpdateTelemetryHistory(ctx context.Context, mac string, date string, hour int, point model.TelemetryDataPoint) error {
 	args := m.Called(ctx, mac, date, hour, point)
 	return args.Error(0)
 }
 
-func (m *MockDatabase) SetDeviceFlow(ctx context.Context, userCode string, session *DeviceFlowSession, ttl time.Duration) error {
+func (m *MockDatabase) SetDeviceFlow(ctx context.Context, userCode string, session *model.DeviceFlowSession, ttl time.Duration) error {
 	args := m.Called(ctx, userCode, session, ttl)
 	return args.Error(0)
 }
 
-func (m *MockDatabase) GetDeviceFlow(ctx context.Context, userCode string) (*DeviceFlowSession, error) {
+func (m *MockDatabase) GetDeviceFlow(ctx context.Context, userCode string) (*model.DeviceFlowSession, error) {
 	args := m.Called(ctx, userCode)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
-	return args.Get(0).(*DeviceFlowSession), args.Error(1)
+	return args.Get(0).(*model.DeviceFlowSession), args.Error(1)
 }
 
 func (m *MockDatabase) DeleteDeviceFlow(ctx context.Context, userCode string) error {
@@ -69,12 +72,12 @@ func (m *MockDatabase) DeleteDeviceFlow(ctx context.Context, userCode string) er
 	return args.Error(0)
 }
 
-func (m *MockDatabase) FindDeviceFlowByDeviceCode(ctx context.Context, deviceCode string) (string, *DeviceFlowSession, error) {
+func (m *MockDatabase) FindDeviceFlowByDeviceCode(ctx context.Context, deviceCode string) (string, *model.DeviceFlowSession, error) {
 	args := m.Called(ctx, deviceCode)
 	if args.Get(1) == nil {
 		return args.String(0), nil, args.Error(2)
 	}
-	return args.String(0), args.Get(1).(*DeviceFlowSession), args.Error(2)
+	return args.String(0), args.Get(1).(*model.DeviceFlowSession), args.Error(2)
 }
 
 func SetupAuthRouter() *gin.Engine {
@@ -87,16 +90,16 @@ func SetupAuthRouter() *gin.Engine {
 
 func TestRegister_Success(t *testing.T) {
 	mockDB := new(MockDatabase)
-	DB = mockDB
+	repository.DB = mockDB
 
-	payload := RegisterPayload{
+	payload := model.RegisterPayload{
 		Phone:    "0987654321",
 		Password: "SecurePassword123",
 	}
 	body, _ := json.Marshal(payload)
 
-	mockDB.On("FindUserByPhone", mock.Anything, payload.Phone).Return((*User)(nil), nil)
-	mockDB.On("CreateUser", mock.Anything, mock.MatchedBy(func(u *User) bool {
+	mockDB.On("FindUserByPhone", mock.Anything, payload.Phone).Return((*model.User)(nil), nil)
+	mockDB.On("CreateUser", mock.Anything, mock.MatchedBy(func(u *model.User) bool {
 		return u.Phone == payload.Phone && bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(payload.Password)) == nil
 	})).Return(nil)
 
@@ -115,15 +118,15 @@ func TestRegister_Success(t *testing.T) {
 
 func TestRegister_DuplicatePhone(t *testing.T) {
 	mockDB := new(MockDatabase)
-	DB = mockDB
+	repository.DB = mockDB
 
-	payload := RegisterPayload{
+	payload := model.RegisterPayload{
 		Phone:    "0987654321",
 		Password: "SecurePassword123",
 	}
 	body, _ := json.Marshal(payload)
 
-	existingUser := &User{
+	existingUser := &model.User{
 		ID:           "user-123",
 		Phone:        payload.Phone,
 		PasswordHash: "somehash",
@@ -146,18 +149,18 @@ func TestRegister_DuplicatePhone(t *testing.T) {
 
 func TestLogin_Success(t *testing.T) {
 	mockDB := new(MockDatabase)
-	DB = mockDB
+	repository.DB = mockDB
 
 	password := "SecurePassword123"
 	hashedPassword, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 
-	payload := LoginPayload{
+	payload := model.LoginPayload{
 		Phone:    "0987654321",
 		Password: password,
 	}
 	body, _ := json.Marshal(payload)
 
-	user := &User{
+	user := &model.User{
 		ID:           "user-123",
 		Phone:        payload.Phone,
 		PasswordHash: string(hashedPassword),
@@ -182,17 +185,17 @@ func TestLogin_Success(t *testing.T) {
 
 func TestLogin_WrongPassword(t *testing.T) {
 	mockDB := new(MockDatabase)
-	DB = mockDB
+	repository.DB = mockDB
 
 	hashedPassword, _ := bcrypt.GenerateFromPassword([]byte("CorrectPassword"), bcrypt.DefaultCost)
 
-	payload := LoginPayload{
+	payload := model.LoginPayload{
 		Phone:    "0987654321",
 		Password: "WrongPassword",
 	}
 	body, _ := json.Marshal(payload)
 
-	user := &User{
+	user := &model.User{
 		ID:           "user-123",
 		Phone:        payload.Phone,
 		PasswordHash: string(hashedPassword),

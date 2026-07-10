@@ -1,10 +1,13 @@
-package main
+package handler
 
 import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
 	"time"
+
+	"medical-iot-backend/internal/model"
+	"medical-iot-backend/internal/repository"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -25,14 +28,14 @@ func generateID() string {
 }
 
 func RegisterHandler(c *gin.Context) {
-	var payload RegisterPayload
+	var payload model.RegisterPayload
 	if err := c.ShouldBindJSON(&payload); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload"})
 		return
 	}
 
 	// Check if user already exists
-	existing, err := DB.FindUserByPhone(c.Request.Context(), payload.Phone)
+	existing, err := repository.DB.FindUserByPhone(c.Request.Context(), payload.Phone)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
 		return
@@ -49,14 +52,14 @@ func RegisterHandler(c *gin.Context) {
 		return
 	}
 
-	user := &User{
+	user := &model.User{
 		ID:           generateID(),
 		Phone:        payload.Phone,
 		PasswordHash: string(hashedPassword),
 		CreatedAt:    time.Now(),
 	}
 
-	if err := DB.CreateUser(c.Request.Context(), user); err != nil {
+	if err := repository.DB.CreateUser(c.Request.Context(), user); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user"})
 		return
 	}
@@ -65,13 +68,13 @@ func RegisterHandler(c *gin.Context) {
 }
 
 func LoginHandler(c *gin.Context) {
-	var payload LoginPayload
+	var payload model.LoginPayload
 	if err := c.ShouldBindJSON(&payload); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload"})
 		return
 	}
 
-	user, err := DB.FindUserByPhone(c.Request.Context(), payload.Phone)
+	user, err := repository.DB.FindUserByPhone(c.Request.Context(), payload.Phone)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
 		return

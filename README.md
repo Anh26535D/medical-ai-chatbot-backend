@@ -7,21 +7,28 @@ This is a high-performance, production-ready Golang backend built using the **Gi
 ## 📂 Project Directory Structure
 
 ```text
-├── database.go         # Mongo & Redis connection setup and DB service interface
-├── database_test.go    # TDD database tests using MongoDB mtest mocking framework
-├── firebase.go         # Structured client layout ready for Firebase RTDB integration
-├── models.go           # Struct models for database documents & API requests/responses
-├── auth_handler.go     # Register & Login handlers (Bcrypt & 30-day JWT signature)
-├── auth_test.go        # Unit tests for authentication endpoints
-├── device_handler.go   # RFC 8628 Device Flow handlers (Authorize, Confirm, Token)
-├── device_test.go      # Unit tests for RFC 8628 Flow
-├── mqtt_worker.go      # Background Goroutine worker subscribing to EMQX telemetry
-├── mqtt_worker_test.go # TDD worker tests verifying parsing, threshold rules, and callbacks
-├── main.go             # Application entrypoint & Gin routers registration
-├── Dockerfile          # Multi-stage optimized Docker build configuration
-├── docker-compose.yml  # Orchestrates Backend App, MongoDB, Redis, and EMQX Broker
-├── test_flow.ps1       # Automated PowerShell end-to-end integration test script
-└── README.md           # Documentation
+├── cmd/
+│   └── server/
+│       └── main.go             # Application entrypoint & Gin router setup
+├── internal/
+│   ├── model/
+│   │   └── models.go           # Struct models for DB documents & API payloads
+│   ├── repository/
+│   │   ├── database.go         # MongoDB & Redis concrete implementations
+│   │   ├── database_test.go    # MongoDB mtest database tests
+│   │   └── firebase.go         # Real-time Firebase RTDB integrations
+│   ├── handler/
+│   │   ├── auth.go             # Register & Login REST handlers
+│   │   ├── auth_test.go        # Unit tests for authentication handlers
+│   │   ├── device.go           # RFC 8628 Device Flow handlers
+│   │   └── device_test.go      # Unit tests for Device Flow handlers
+│   └── worker/
+│       ├── mqtt_worker.go      # Background MQTT subscriber
+│       └── mqtt_worker_test.go # TDD tests for telemetry parsing & thresholds
+├── Dockerfile                  # Multi-stage optimized Docker build configuration
+├── docker-compose.yml          # Orchestrates app, MongoDB, Redis, and EMQX
+├── test_flow.ps1               # Automated end-to-end integration script
+└── README.md                   # Documentation
 ```
 
 ---

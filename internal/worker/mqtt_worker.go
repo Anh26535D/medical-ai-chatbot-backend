@@ -1,4 +1,4 @@
-package main
+package worker
 
 import (
 	"context"
@@ -6,6 +6,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"medical-iot-backend/internal/model"
+	"medical-iot-backend/internal/repository"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
@@ -87,7 +90,7 @@ func handleTelemetryMessage(ctx context.Context, msg mqtt.Message) {
 	status := evaluateStatus(bpm, spo2, temp)
 	now := time.Now()
 
-	point := TelemetryDataPoint{
+	point := model.TelemetryDataPoint{
 		Timestamp:   now.Unix(),
 		BPM:         bpm,
 		SPO2:        spo2,
@@ -100,7 +103,7 @@ func handleTelemetryMessage(ctx context.Context, msg mqtt.Message) {
 	hour := now.Hour()
 
 	// Update in MongoDB hourly bucket
-	err := DB.UpdateTelemetryHistory(ctx, mac, date, hour, point)
+	err := repository.DB.UpdateTelemetryHistory(ctx, mac, date, hour, point)
 	if err != nil {
 		log.Printf("[MQTT Worker] Failed to update telemetry bucket in MongoDB for device %s: %v", mac, err)
 	} else {
@@ -108,8 +111,8 @@ func handleTelemetryMessage(ctx context.Context, msg mqtt.Message) {
 	}
 
 	// Update in Firebase Realtime Database
-	if Firebase != nil {
-		if err := Firebase.UpdateLiveTelemetry(ctx, mac, point); err != nil {
+	if repository.Firebase != nil {
+		if err := repository.Firebase.UpdateLiveTelemetry(ctx, mac, point); err != nil {
 			log.Printf("[MQTT Worker] Failed to update live telemetry in Firebase for device %s: %v", mac, err)
 		} else {
 			log.Printf("[MQTT Worker] Updated live telemetry in Firebase for device %s", mac)

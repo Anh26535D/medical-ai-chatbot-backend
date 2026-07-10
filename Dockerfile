@@ -8,10 +8,10 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 # Copy source code
-COPY *.go ./
+COPY . .
 
 # Build the application binary
-RUN CGO_ENABLED=0 GOOS=linux go build -o medical-iot-backend .
+RUN CGO_ENABLED=0 GOOS=linux go build -o medical-iot-backend ./cmd/server
 
 # Production runner stage
 FROM alpine:3.19

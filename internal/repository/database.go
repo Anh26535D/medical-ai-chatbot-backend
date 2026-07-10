@@ -1,4 +1,4 @@
-package main
+package repository
 
 import (
 	"context"
@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"medical-iot-backend/internal/model"
 
 	"github.com/go-redis/redis/v8"
 	"go.mongodb.org/mongo-driver/bson"
@@ -15,16 +17,16 @@ import (
 
 // DatabaseService defines all database operations needed by the application.
 type DatabaseService interface {
-	FindUserByPhone(ctx context.Context, phone string) (*User, error)
-	CreateUser(ctx context.Context, user *User) error
-	SaveDevice(ctx context.Context, device *Device) error
-	GetDevice(ctx context.Context, mac string) (*Device, error)
-	UpdateTelemetryHistory(ctx context.Context, mac string, date string, hour int, point TelemetryDataPoint) error
+	FindUserByPhone(ctx context.Context, phone string) (*model.User, error)
+	CreateUser(ctx context.Context, user *model.User) error
+	SaveDevice(ctx context.Context, device *model.Device) error
+	GetDevice(ctx context.Context, mac string) (*model.Device, error)
+	UpdateTelemetryHistory(ctx context.Context, mac string, date string, hour int, point model.TelemetryDataPoint) error
 
-	SetDeviceFlow(ctx context.Context, userCode string, session *DeviceFlowSession, ttl time.Duration) error
-	GetDeviceFlow(ctx context.Context, userCode string) (*DeviceFlowSession, error)
+	SetDeviceFlow(ctx context.Context, userCode string, session *model.DeviceFlowSession, ttl time.Duration) error
+	GetDeviceFlow(ctx context.Context, userCode string) (*model.DeviceFlowSession, error)
 	DeleteDeviceFlow(ctx context.Context, userCode string) error
-	FindDeviceFlowByDeviceCode(ctx context.Context, deviceCode string) (string, *DeviceFlowSession, error)
+	FindDeviceFlowByDeviceCode(ctx context.Context, deviceCode string) (string, *model.DeviceFlowSession, error)
 }
 
 // Global DB instance
@@ -37,9 +39,9 @@ type RealDatabase struct {
 	MongoDbName string
 }
 
-func (r *RealDatabase) FindUserByPhone(ctx context.Context, phone string) (*User, error) {
+func (r *RealDatabase) FindUserByPhone(ctx context.Context, phone string) (*model.User, error) {
 	collection := r.MongoClient.Database(r.MongoDbName).Collection("users")
-	var user User
+	var user model.User
 	err := collection.FindOne(ctx, bson.M{"phone": phone}).Decode(&user)
 	if err == mongo.ErrNoDocuments {
 		return nil, nil
@@ -47,22 +49,22 @@ func (r *RealDatabase) FindUserByPhone(ctx context.Context, phone string) (*User
 	return &user, err
 }
 
-func (r *RealDatabase) CreateUser(ctx context.Context, user *User) error {
+func (r *RealDatabase) CreateUser(ctx context.Context, user *model.User) error {
 	collection := r.MongoClient.Database(r.MongoDbName).Collection("users")
 	_, err := collection.InsertOne(ctx, user)
 	return err
 }
 
-func (r *RealDatabase) SaveDevice(ctx context.Context, device *Device) error {
+func (r *RealDatabase) SaveDevice(ctx context.Context, device *model.Device) error {
 	collection := r.MongoClient.Database(r.MongoDbName).Collection("devices")
 	opts := options.Replace().SetUpsert(true)
 	_, err := collection.ReplaceOne(ctx, bson.M{"_id": device.ID}, device, opts)
 	return err
 }
 
-func (r *RealDatabase) GetDevice(ctx context.Context, mac string) (*Device, error) {
+func (r *RealDatabase) GetDevice(ctx context.Context, mac string) (*model.Device, error) {
 	collection := r.MongoClient.Database(r.MongoDbName).Collection("devices")
-	var device Device
+	var device model.Device
 	err := collection.FindOne(ctx, bson.M{"_id": mac}).Decode(&device)
 	if err == mongo.ErrNoDocuments {
 		return nil, nil
@@ -70,7 +72,7 @@ func (r *RealDatabase) GetDevice(ctx context.Context, mac string) (*Device, erro
 	return &device, err
 }
 
-func (r *RealDatabase) UpdateTelemetryHistory(ctx context.Context, mac string, date string, hour int, point TelemetryDataPoint) error {
+func (r *RealDatabase) UpdateTelemetryHistory(ctx context.Context, mac string, date string, hour int, point model.TelemetryDataPoint) error {
 	collection := r.MongoClient.Database(r.MongoDbName).Collection("telemetry_history")
 	id := fmt.Sprintf("%s_%s_%02d", mac, date, hour)
 
@@ -90,8 +92,7 @@ func (r *RealDatabase) UpdateTelemetryHistory(ctx context.Context, mac string, d
 	return err
 }
 
-// Let's rewrite the method to avoid issues and use formatting
-func (r *RealDatabase) SetDeviceFlow(ctx context.Context, userCode string, session *DeviceFlowSession, ttl time.Duration) error {
+func (r *RealDatabase) SetDeviceFlow(ctx context.Context, userCode string, session *model.DeviceFlowSession, ttl time.Duration) error {
 	data, err := json.Marshal(session)
 	if err != nil {
 		return err
@@ -100,7 +101,7 @@ func (r *RealDatabase) SetDeviceFlow(ctx context.Context, userCode string, sessi
 	return r.RedisClient.Set(ctx, key, data, ttl).Err()
 }
 
-func (r *RealDatabase) GetDeviceFlow(ctx context.Context, userCode string) (*DeviceFlowSession, error) {
+func (r *RealDatabase) GetDeviceFlow(ctx context.Context, userCode string) (*model.DeviceFlowSession, error) {
 	key := "device_flow:" + userCode
 	val, err := r.RedisClient.Get(ctx, key).Result()
 	if err == redis.Nil {
@@ -108,7 +109,7 @@ func (r *RealDatabase) GetDeviceFlow(ctx context.Context, userCode string) (*Dev
 	} else if err != nil {
 		return nil, err
 	}
-	var session DeviceFlowSession
+	var session model.DeviceFlowSession
 	err = json.Unmarshal([]byte(val), &session)
 	if err != nil {
 		return nil, err
@@ -121,7 +122,7 @@ func (r *RealDatabase) DeleteDeviceFlow(ctx context.Context, userCode string) er
 	return r.RedisClient.Del(ctx, key).Err()
 }
 
-func (r *RealDatabase) FindDeviceFlowByDeviceCode(ctx context.Context, deviceCode string) (string, *DeviceFlowSession, error) {
+func (r *RealDatabase) FindDeviceFlowByDeviceCode(ctx context.Context, deviceCode string) (string, *model.DeviceFlowSession, error) {
 	var cursor uint64
 	for {
 		keys, nextCursor, err := r.RedisClient.Scan(ctx, cursor, "device_flow:*", 10).Result()
@@ -133,10 +134,9 @@ func (r *RealDatabase) FindDeviceFlowByDeviceCode(ctx context.Context, deviceCod
 			if err != nil {
 				continue
 			}
-			var session DeviceFlowSession
+			var session model.DeviceFlowSession
 			if err := json.Unmarshal([]byte(val), &session); err == nil {
 				if session.DeviceCode == deviceCode {
-					// prefix is "device_flow:" (12 chars)
 					userCode := key[12:]
 					return userCode, &session, nil
 				}
