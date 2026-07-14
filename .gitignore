@@ -15,3 +15,7 @@ medical-iot-backend
 mongo_data/
 redis_data/
 emqx_data/
+
+# Deployment tars and script helpers
+medical-iot-backend.tar
+configure_emqx.sh
