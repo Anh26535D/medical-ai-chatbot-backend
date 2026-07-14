@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   app:
-    build: .
+    image: medical-iot-backend:latest
     container_name: medical_iot_backend
     ports:
       - "8080:8080"
