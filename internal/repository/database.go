@@ -21,6 +21,7 @@ type DatabaseService interface {
 	CreateUser(ctx context.Context, user *model.User) error
 	SaveDevice(ctx context.Context, device *model.Device) error
 	GetDevice(ctx context.Context, mac string) (*model.Device, error)
+	DeleteDevice(ctx context.Context, mac string) error
 	UpdateTelemetryHistory(ctx context.Context, mac string, date string, hour int, point model.TelemetryDataPoint) error
 
 	SetDeviceFlow(ctx context.Context, userCode string, session *model.DeviceFlowSession, ttl time.Duration) error
@@ -70,6 +71,12 @@ func (r *RealDatabase) GetDevice(ctx context.Context, mac string) (*model.Device
 		return nil, nil
 	}
 	return &device, err
+}
+
+func (r *RealDatabase) DeleteDevice(ctx context.Context, mac string) error {
+	collection := r.MongoClient.Database(r.MongoDbName).Collection("devices")
+	_, err := collection.DeleteOne(ctx, bson.M{"_id": mac})
+	return err
 }
 
 func (r *RealDatabase) UpdateTelemetryHistory(ctx context.Context, mac string, date string, hour int, point model.TelemetryDataPoint) error {

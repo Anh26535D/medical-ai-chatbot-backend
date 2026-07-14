@@ -41,12 +41,13 @@ type TelemetryHistory struct {
 
 // DeviceFlowSession represents data cached in Redis for RFC 8628 Device Flow
 type DeviceFlowSession struct {
-	DeviceCode string `json:"device_code"`
-	MACAddress string `json:"mac_address"`
-	UIDESP     string `json:"uid_esp"`
-	SessionID  string `json:"session_id"`
-	Status     string `json:"status"` // "authorization_pending" or "approved"
-	OwnerUID   string `json:"owner_uid,omitempty"`
+	DeviceCode   string `json:"device_code"`
+	MACAddress   string `json:"mac_address"`
+	UIDESP       string `json:"uid_esp"`
+	SessionID    string `json:"session_id"`
+	Status       string `json:"status"` // "authorization_pending" or "approved"
+	OwnerUID     string `json:"owner_uid,omitempty"`
+	PairingNonce string `json:"pairing_nonce"`
 }
 
 // RegisterPayload defines the body for registration

@@ -54,10 +54,10 @@ func ComputePinPopSignature(userCode, macAddress, sessionId string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// Cập nhật trạng thái Provisioning thật lên Firebase Realtime Database qua REST API Client
-func UpdateRealFirebaseProvisioning(ctx context.Context, mac, sessionId, userCode, deviceCode string) error {
+// UpdateRealFirebaseProvisioning ghi trạng thái Provisioning lên Firebase Realtime Database
+func UpdateRealFirebaseProvisioning(ctx context.Context, mac, sessionId, userCode, pairingNonce string) error {
 	if repository.Firebase != nil {
-		return repository.Firebase.UpdateProvisioningStatus(ctx, mac, sessionId, userCode, deviceCode)
+		return repository.Firebase.UpdateProvisioningStatus(ctx, mac, sessionId, userCode, pairingNonce)
 	}
 	log.Printf("[Firebase WARNING] Firebase Client chưa được khởi tạo. Không thể ghi nhận trạng thái pairing!")
 	return fmt.Errorf("firebase client uninitialized")
@@ -72,13 +72,15 @@ func DeviceAuthorizeHandler(c *gin.Context) {
 
 	deviceCode := generateRandomString(32)
 	userCode := generateUserCode()
+	pairingNonce := generateRandomString(16)
 
 	session := &model.DeviceFlowSession{
-		DeviceCode: deviceCode,
-		MACAddress: payload.MACAddress,
-		UIDESP:     "esp32-" + generateRandomString(8),
-		SessionID:  payload.SessionID,
-		Status:     "authorization_pending",
+		DeviceCode:   deviceCode,
+		MACAddress:   payload.MACAddress,
+		UIDESP:       "esp32-" + generateRandomString(8),
+		SessionID:    payload.SessionID,
+		Status:       "authorization_pending",
+		PairingNonce: pairingNonce,
 	}
 
 	err := repository.DB.SetDeviceFlow(c.Request.Context(), userCode, session, 300*time.Second)
@@ -87,8 +89,13 @@ func DeviceAuthorizeHandler(c *gin.Context) {
 		return
 	}
 
+	// Dọn dẹp bản ghi polling cũ nếu có trên Firebase trước khi tạo phiên mới
+	if repository.Firebase != nil {
+		_ = repository.Firebase.DeleteProvisioningStatus(c.Request.Context(), payload.MACAddress, payload.SessionID)
+	}
+
 	// Ghi nhận trạng thái thật lên Firebase phục vụ cơ chế polling phía App/Web frontend
-	if err := UpdateRealFirebaseProvisioning(c.Request.Context(), payload.MACAddress, payload.SessionID, userCode, deviceCode); err != nil {
+	if err := UpdateRealFirebaseProvisioning(c.Request.Context(), payload.MACAddress, payload.SessionID, userCode, pairingNonce); err != nil {
 		log.Printf("[Firebase Error] Lỗi đồng bộ luồng pairing: %v", err)
 	}
 
@@ -124,13 +131,6 @@ func DeviceConfirmHandler(c *gin.Context) {
 		return
 	}
 
-	// Validate Pin POP Signature
-	expectedSig := ComputePinPopSignature(payload.UserCode, payload.MACAddress, payload.SessionID)
-	if payload.PinPopSignature != expectedSig {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid PIN PoP signature"})
-		return
-	}
-
 	session, err := repository.DB.GetDeviceFlow(c.Request.Context(), payload.UserCode)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Authorization session expired or not found"})
@@ -139,6 +139,16 @@ func DeviceConfirmHandler(c *gin.Context) {
 
 	if session.MACAddress != payload.MACAddress || session.SessionID != payload.SessionID {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Device session mismatch"})
+		return
+	}
+
+	// Validate Pin POP Signature using the dynamic PairingNonce from Redis
+	h := hmac.New(sha256.New, []byte(session.PairingNonce))
+	h.Write([]byte(payload.UserCode + ":" + payload.MACAddress + ":" + payload.SessionID))
+	expectedSig := hex.EncodeToString(h.Sum(nil))
+
+	if payload.PinPopSignature != expectedSig {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid PIN PoP signature"})
 		return
 	}
 
@@ -163,6 +173,10 @@ func DeviceTokenHandler(c *gin.Context) {
 
 	userCode, session, err := repository.DB.FindDeviceFlowByDeviceCode(c.Request.Context(), payload.DeviceCode)
 	if err != nil {
+		// Dọn dẹp bản ghi polling cũ trên Firebase vì phiên đã quá hạn ở Redis
+		if repository.Firebase != nil {
+			_ = repository.Firebase.DeleteProvisioningStatus(c.Request.Context(), payload.MACAddress, "")
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Authorization session expired or not found"})
 		return
 	}
@@ -199,11 +213,170 @@ func DeviceTokenHandler(c *gin.Context) {
 		return
 	}
 
+	// Update device ownership in Firebase to enforce Security Rules
+	if repository.Firebase != nil {
+		if err := repository.Firebase.SetDeviceOwnership(c.Request.Context(), session.OwnerUID, payload.MACAddress); err != nil {
+			log.Printf("[Firebase Error] Failed to set device ownership for security rules: %v", err)
+		}
+	}
+
 	// Clean up temp Redis session
 	_ = repository.DB.DeleteDeviceFlow(c.Request.Context(), userCode)
+
+	// Clean up the Firebase polling entry now that pairing is complete. session.SessionID
+	// is the real key used when the entry was created in DeviceAuthorizeHandler — unlike
+	// the expired-session branch above, we actually have it here.
+	if repository.Firebase != nil {
+		_ = repository.Firebase.DeleteProvisioningStatus(c.Request.Context(), payload.MACAddress, session.SessionID)
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"access_token": accessToken,
 		"token_type":   "bearer",
 	})
+}
+
+// MqttAuthPayload defines payload from EMQX HTTP Auth request
+type MqttAuthPayload struct {
+	ClientID string `json:"clientid"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// MqttAuthHandler authenticates MQTT connections from devices using their access token
+func MqttAuthHandler(c *gin.Context) {
+	var payload MqttAuthPayload
+	// Fallback to form/query binding since EMQX can send form data or JSON
+	if err := c.ShouldBind(&payload); err != nil {
+		if err := c.ShouldBindJSON(&payload); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"result": "deny", "error": "Invalid request payload"})
+			return
+		}
+	}
+
+	log.Printf("[DOCKER-DEBUG] MqttAuthHandler parsed payload: ClientID='%s', Username='%s', Password='%s'", payload.ClientID, payload.Username, payload.Password)
+
+	mac := payload.ClientID
+	token := payload.Password
+
+	if mac == "" || token == "" {
+		log.Printf("[DOCKER-DEBUG] MQTT Auth rejected: ClientID or Password empty (mac='%s', token='%s')", mac, token)
+		c.JSON(http.StatusBadRequest, gin.H{"result": "deny", "error": "Missing clientid or password"})
+		return
+	}
+
+	// The backend's own MQTT worker isn't a paired device, so it authenticates via a
+	// shared secret instead of a per-device token lookup in MongoDB.
+	if mac == MQTTWorkerClientID {
+		if token == MQTTWorkerSecret {
+			c.JSON(http.StatusOK, gin.H{"result": "allow"})
+		} else {
+			c.JSON(http.StatusForbidden, gin.H{"result": "deny", "error": "Invalid worker credentials"})
+		}
+		return
+	}
+
+	// Lookup device in DB to check token
+	device, err := repository.DB.GetDevice(c.Request.Context(), mac)
+	if err != nil || device == nil {
+		c.JSON(http.StatusForbidden, gin.H{"result": "deny", "error": "Device not registered"})
+		return
+	}
+
+	if device.AccessToken != token {
+		c.JSON(http.StatusForbidden, gin.H{"result": "deny", "error": "Invalid access token"})
+		return
+	}
+
+	// Access granted
+	c.JSON(http.StatusOK, gin.H{"result": "allow"})
+}
+
+// MqttAclPayload defines payload from EMQX HTTP ACL request
+type MqttAclPayload struct {
+	ClientID string `json:"clientid"`
+	Username string `json:"username"`
+	Topic    string `json:"topic"`
+	Access   string `json:"action"` // "publish" or "subscribe"
+}
+
+// MqttAclHandler enforces authorization rules for topic access on EMQX
+func MqttAclHandler(c *gin.Context) {
+	var payload MqttAclPayload
+	if err := c.ShouldBind(&payload); err != nil {
+		if err := c.ShouldBindJSON(&payload); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"result": "deny", "error": "Invalid request payload"})
+			return
+		}
+	}
+
+	// Rule: the backend's own MQTT worker may subscribe to the telemetry wildcard topic
+	if payload.ClientID == MQTTWorkerClientID && payload.Access == "subscribe" && payload.Topic == "devices/+/telemetry" {
+		c.JSON(http.StatusOK, gin.H{"result": "allow"})
+		return
+	}
+
+	// Rule: Device can only publish to "devices/{clientid}/telemetry"
+	expectedTopic := fmt.Sprintf("devices/%s/telemetry", payload.ClientID)
+	if payload.Access == "publish" && payload.Topic == expectedTopic {
+		c.JSON(http.StatusOK, gin.H{"result": "allow"})
+		return
+	}
+
+	// Deny by default for any other requests
+	c.JSON(http.StatusForbidden, gin.H{"result": "deny"})
+}
+
+// DeviceUnpairHandler deletes the paired device mapping from MongoDB and Firebase (Unpair)
+func DeviceUnpairHandler(c *gin.Context) {
+	authHeader := c.GetHeader("Authorization")
+	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization token required"})
+		return
+	}
+	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+
+	claims := &Claims{}
+	token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
+		return JWTSecret, nil
+	})
+	if err != nil || !token.Valid {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
+		return
+	}
+
+	mac := c.Param("mac")
+	if mac == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "MAC address parameter is required"})
+		return
+	}
+
+	// 1. Check ownership in MongoDB
+	device, err := repository.DB.GetDevice(c.Request.Context(), mac)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database lookup failed"})
+		return
+	}
+	if device == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Device not found"})
+		return
+	}
+	if device.OwnerUID != claims.UIDUser {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not own this device"})
+		return
+	}
+
+	// 2. Delete device from MongoDB
+	err = repository.DB.DeleteDevice(c.Request.Context(), mac)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to unpair device"})
+		return
+	}
+
+	// 3. Delete mapping from Firebase to enforce Security Rules (block clients)
+	if repository.Firebase != nil {
+		_ = repository.Firebase.DeleteDeviceOwnership(c.Request.Context(), mac)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Device unpaired successfully"})
 }

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"medical-iot-backend/internal/handler"
 	"medical-iot-backend/internal/model"
 	"medical-iot-backend/internal/repository"
 
@@ -24,9 +25,19 @@ func evaluateStatus(bpm, spo2 int, temp float64) string {
 
 func StartMQTTWorker(ctx context.Context, brokerURI string) {
 	opts := mqtt.NewClientOptions().AddBroker(brokerURI)
-	opts.SetClientID("medical_iot_backend_worker")
+	opts.SetClientID(handler.MQTTWorkerClientID)
+	// EMQX's HTTP auth/ACL webhooks authenticate every client, including this one, so the
+	// worker must present the shared secret that MqttAuthHandler expects for its client ID.
+	opts.SetUsername(handler.MQTTWorkerClientID)
+	opts.SetPassword(handler.MQTTWorkerSecret)
 	opts.SetCleanSession(true)
 	opts.SetAutoReconnect(true)
+	// The broker's auth webhook calls back into this same process's HTTP server, which
+	// hasn't started listening yet when this first connect attempt fires (it happens
+	// before r.Run in main.go), so the initial attempt is expected to fail. ConnectRetry
+	// makes the client keep retrying in the background until the HTTP server is up.
+	opts.SetConnectRetry(true)
+	opts.SetConnectRetryInterval(5 * time.Second)
 
 	opts.OnConnect = func(client mqtt.Client) {
 		log.Println("[MQTT Worker] Connected to EMQX Broker successfully")
@@ -45,9 +56,10 @@ func StartMQTTWorker(ctx context.Context, brokerURI string) {
 	}
 
 	client := mqtt.NewClient(opts)
-	if token := client.Connect(); token.Wait() && token.Error() != nil {
-		log.Printf("[MQTT Worker] Broker connection failed: %v. Retrying in background...", token.Error())
-	}
+	// Don't block on token.Wait() here: with ConnectRetry, the connect goroutine loops
+	// internally until success and never completes the token on failure, which would
+	// deadlock main() before it ever starts the HTTP server this worker depends on.
+	client.Connect()
 
 	// Keep alive or clean up on context done
 	go func() {
@@ -110,12 +122,18 @@ func handleTelemetryMessage(ctx context.Context, msg mqtt.Message) {
 		log.Printf("[MQTT Worker] Saved telemetry data to MongoDB bucket for device %s", mac)
 	}
 
-	// Update in Firebase Realtime Database
+	// Update in Firebase Realtime Database under users/{ownerUID}/devices/{mac}/telemetry/latest
 	if repository.Firebase != nil {
-		if err := repository.Firebase.UpdateLiveTelemetry(ctx, mac, point); err != nil {
-			log.Printf("[MQTT Worker] Failed to update live telemetry in Firebase for device %s: %v", mac, err)
+		// Look up ownerUID from MongoDB
+		device, err := repository.DB.GetDevice(ctx, mac)
+		if err != nil || device == nil {
+			log.Printf("[MQTT Worker] Device %s not found in MongoDB, skipping Firebase update", mac)
 		} else {
-			log.Printf("[MQTT Worker] Updated live telemetry in Firebase for device %s", mac)
+			if err := repository.Firebase.UpdateLiveTelemetry(ctx, device.OwnerUID, mac, point); err != nil {
+				log.Printf("[MQTT Worker] Failed to update live telemetry in Firebase for device %s: %v", mac, err)
+			} else {
+				log.Printf("[MQTT Worker] Updated live telemetry in Firebase at users/%s/devices/%s/telemetry/latest", device.OwnerUID, mac)
+			}
 		}
 	}
 }

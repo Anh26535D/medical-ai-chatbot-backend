@@ -3,7 +3,9 @@ package handler
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"medical-iot-backend/internal/model"
@@ -14,7 +16,26 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-var JWTSecret = []byte("super-secret-key-medical-iot")
+var JWTSecret = func() []byte {
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" {
+		return []byte("super-secret-key-medical-iot")
+	}
+	return []byte(secret)
+}()
+
+// MQTTWorkerClientID identifies the backend's own MQTT client (see worker.StartMQTTWorker),
+// which subscribes to devices/+/telemetry and must authenticate/authorize like any other
+// EMQX client via the HTTP auth/ACL webhooks below, but has no per-device token in MongoDB.
+const MQTTWorkerClientID = "medical_iot_backend_worker"
+
+var MQTTWorkerSecret = func() string {
+	secret := os.Getenv("MQTT_WORKER_SECRET")
+	if secret == "" {
+		return "insecure-default-worker-secret-change-me"
+	}
+	return secret
+}()
 
 type Claims struct {
 	UIDUser string `json:"uid_user"`
@@ -107,8 +128,21 @@ func LoginHandler(c *gin.Context) {
 		return
 	}
 
+	// Mint a Firebase Auth custom token for this same user ID, so the Android app's
+	// FirebaseAuth.currentUser.uid (after signInWithCustomToken) matches user.ID — the
+	// same ID this backend uses for the RTDB users/{uid}/... telemetry paths and rules.
+	var firebaseToken string
+	if repository.Firebase != nil {
+		if ft, ferr := repository.Firebase.MintCustomToken(user.ID); ferr != nil {
+			log.Printf("[Auth] Failed to mint Firebase custom token for user %s: %v", user.ID, ferr)
+		} else {
+			firebaseToken = ft
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"token":      tokenString,
-		"expires_at": expirationTime.Unix(),
+		"token":          tokenString,
+		"expires_at":     expirationTime.Unix(),
+		"firebase_token": firebaseToken,
 	})
 }

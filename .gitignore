@@ -1,3 +1,5 @@
+firebase-adminsdk.json
+
 # Go binaries
 medical-iot-backend
 *.exe

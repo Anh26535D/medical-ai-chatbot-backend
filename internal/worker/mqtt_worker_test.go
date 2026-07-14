@@ -44,7 +44,14 @@ func (m *MockDatabase) SaveDevice(ctx context.Context, device *model.Device) err
 	return nil
 }
 func (m *MockDatabase) GetDevice(ctx context.Context, mac string) (*model.Device, error) {
-	return nil, nil
+	args := m.Called(ctx, mac)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*model.Device), args.Error(1)
+}
+func (m *MockDatabase) DeleteDevice(ctx context.Context, mac string) error {
+	return nil
 }
 func (m *MockDatabase) UpdateTelemetryHistory(ctx context.Context, mac string, date string, hour int, point model.TelemetryDataPoint) error {
 	args := m.Called(ctx, mac, date, hour, point)
@@ -102,6 +109,12 @@ func TestHandleTelemetryMessage_Success(t *testing.T) {
 		return p.BPM == 75 && p.SPO2 == 98 && p.Temperature == 36.5 && p.Humidity == 65.0 && p.Status == "Normal"
 	})).Return(nil)
 
+	device := &model.Device{
+		ID:       mac,
+		OwnerUID: "user-123",
+	}
+	mockDB.On("GetDevice", mock.Anything, mac).Return(device, nil)
+
 	// 2. Setup mock Firebase HTTP server
 	var firebaseReceivedPayload model.TelemetryDataPoint
 	var firebaseReceivedURL string
@@ -128,7 +141,7 @@ func TestHandleTelemetryMessage_Success(t *testing.T) {
 
 	// Assertions
 	mockDB.AssertExpectations(t)
-	assert.Equal(t, "/devices/"+mac+"/telemetry/latest.json", firebaseReceivedURL)
+	assert.Equal(t, "/users/user-123/devices/"+mac+"/telemetry/latest.json", firebaseReceivedURL)
 	assert.Equal(t, 75, firebaseReceivedPayload.BPM)
 	assert.Equal(t, 98, firebaseReceivedPayload.SPO2)
 	assert.Equal(t, 36.5, firebaseReceivedPayload.Temperature)

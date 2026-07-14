@@ -1,0 +1,25 @@
+[req]
+distinguished_name = req_distinguished_name
+req_extensions = v3_req
+prompt = no
+
+[req_distinguished_name]
+CN = medical-iot-emqx
+
+[v3_req]
+keyUsage = keyEncipherment, dataEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = @alt_names
+
+[alt_names]
+IP.1 = 192.168.1.41
+IP.2 = 192.168.1.5
+IP.3 = 127.0.0.1
+DNS.1 = emqx
+DNS.2 = localhost
+# mbedTLS 2.28.x (bundled with arduino-esp32) only matches the TLS hostname
+# against SAN entries of type dNSName, not iPAddress. Since the ESP32 firmware
+# connects by literal IP (no DNS on the LAN), duplicate each IP here as a DNS
+# entry so mbedTLS's string-based hostname check can match it.
+DNS.3 = 192.168.1.41
+DNS.4 = 192.168.1.5

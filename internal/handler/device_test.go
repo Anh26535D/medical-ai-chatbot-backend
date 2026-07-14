@@ -2,6 +2,9 @@ package handler
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -31,6 +34,9 @@ func SetupDeviceRouter() *gin.Engine {
 	r.POST("/api/v1/oauth/device/authorize", DeviceAuthorizeHandler)
 	r.POST("/api/v1/oauth/device/confirm", DeviceConfirmHandler)
 	r.POST("/api/v1/oauth/token", DeviceTokenHandler)
+	r.POST("/api/v1/mqtt/auth", MqttAuthHandler)
+	r.POST("/api/v1/mqtt/acl", MqttAclHandler)
+	r.DELETE("/api/v1/devices/:mac", DeviceUnpairHandler)
 	return r
 }
 
@@ -92,6 +98,15 @@ func TestConfirm_InvalidSignature(t *testing.T) {
 	}
 	body, _ := json.Marshal(payload)
 
+	session := &model.DeviceFlowSession{
+		DeviceCode:   "devicecode123",
+		MACAddress:   "00:11:22:33:44:55",
+		SessionID:    "session-abc-123",
+		PairingNonce: "pin-pop-secret-key",
+		Status:       "authorization_pending",
+	}
+	mockDB.On("GetDeviceFlow", mock.Anything, "ABCD-1234").Return(session, nil)
+
 	r := SetupDeviceRouter()
 	req, _ := http.NewRequest("POST", "/api/v1/oauth/device/confirm", bytes.NewBuffer(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -132,11 +147,12 @@ func TestConfirm_Success(t *testing.T) {
 	body, _ := json.Marshal(payload)
 
 	session := &model.DeviceFlowSession{
-		DeviceCode: "devicecode1234567890123456789012",
-		MACAddress: mac,
-		UIDESP:     "esp-32-id",
-		SessionID:  sessionID,
-		Status:     "authorization_pending",
+		DeviceCode:   "devicecode1234567890123456789012",
+		MACAddress:   mac,
+		UIDESP:       "esp-32-id",
+		SessionID:    sessionID,
+		Status:       "authorization_pending",
+		PairingNonce: "pin-pop-secret-key",
 	}
 
 	mockDB.On("GetDeviceFlow", mock.Anything, userCode).Return(session, nil)
@@ -229,5 +245,148 @@ func TestToken_Success(t *testing.T) {
 	_ = json.Unmarshal(w.Body.Bytes(), &resp)
 	assert.Contains(t, resp, "access_token")
 	assert.Equal(t, "bearer", resp["token_type"])
+	mockDB.AssertExpectations(t)
+}
+
+func TestMqttAuth_Success(t *testing.T) {
+	mockDB := new(MockDatabase)
+	repository.DB = mockDB
+
+	mac := "001122334455"
+	token := "dev_token_123"
+	payload := MqttAuthPayload{
+		ClientID: mac,
+		Username: mac,
+		Password: token,
+	}
+	body, _ := json.Marshal(payload)
+
+	device := &model.Device{
+		ID:          mac,
+		AccessToken: token,
+		OwnerUID:    "user-123",
+	}
+
+	mockDB.On("GetDevice", mock.Anything, mac).Return(device, nil)
+
+	r := SetupDeviceRouter()
+	req, _ := http.NewRequest("POST", "/api/v1/mqtt/auth", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]interface{}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	assert.Equal(t, "allow", resp["result"])
+}
+
+func TestMqttAuth_Deny(t *testing.T) {
+	mockDB := new(MockDatabase)
+	repository.DB = mockDB
+
+	mac := "001122334455"
+	payload := MqttAuthPayload{
+		ClientID: mac,
+		Username: mac,
+		Password: "wrong_token",
+	}
+	body, _ := json.Marshal(payload)
+
+	device := &model.Device{
+		ID:          mac,
+		AccessToken: "correct_token",
+		OwnerUID:    "user-123",
+	}
+
+	mockDB.On("GetDevice", mock.Anything, mac).Return(device, nil)
+
+	r := SetupDeviceRouter()
+	req, _ := http.NewRequest("POST", "/api/v1/mqtt/auth", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	var resp map[string]interface{}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	assert.Equal(t, "deny", resp["result"])
+}
+
+func TestMqttAcl_Allow(t *testing.T) {
+	payload := MqttAclPayload{
+		ClientID: "001122334455",
+		Username: "001122334455",
+		Topic:    "devices/001122334455/telemetry",
+		Access:   "publish",
+	}
+	body, _ := json.Marshal(payload)
+
+	r := SetupDeviceRouter()
+	req, _ := http.NewRequest("POST", "/api/v1/mqtt/acl", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]interface{}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	assert.Equal(t, "allow", resp["result"])
+}
+
+func TestMqttAcl_Deny(t *testing.T) {
+	payload := MqttAclPayload{
+		ClientID: "001122334455",
+		Username: "001122334455",
+		Topic:    "devices/other_device/telemetry",
+		Access:   "publish",
+	}
+	body, _ := json.Marshal(payload)
+
+	r := SetupDeviceRouter()
+	req, _ := http.NewRequest("POST", "/api/v1/mqtt/acl", bytes.NewBuffer(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	var resp map[string]interface{}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	assert.Equal(t, "deny", resp["result"])
+}
+
+func TestDeviceUnpair_Success(t *testing.T) {
+	mockDB := new(MockDatabase)
+	repository.DB = mockDB
+
+	claims := &Claims{
+		UIDUser: "user-123",
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+		},
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, _ := token.SignedString(JWTSecret)
+
+	mac := "001122334455"
+	device := &model.Device{
+		ID:          mac,
+		OwnerUID:    "user-123",
+		AccessToken: "dev_token_123",
+	}
+
+	mockDB.On("GetDevice", mock.Anything, mac).Return(device, nil)
+	mockDB.On("DeleteDevice", mock.Anything, mac).Return(nil)
+
+	r := SetupDeviceRouter()
+	req, _ := http.NewRequest("DELETE", "/api/v1/devices/"+mac, nil)
+	req.Header.Set("Authorization", "Bearer "+tokenString)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]interface{}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	assert.Equal(t, "Device unpaired successfully", resp["message"])
 	mockDB.AssertExpectations(t)
 }

@@ -13,11 +13,17 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
+	"github.com/joho/godotenv"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 func main() {
+	// Load .env file if it exists (for local development outside Docker)
+	if err := godotenv.Load(); err != nil {
+		log.Println("Note: .env file not found, using system environment variables")
+	}
+
 	log.Println("Starting Medical IoT Backend...")
 
 	// 1. Initialize MongoDB Connection
@@ -87,6 +93,16 @@ func main() {
 		gin.SetMode(ginMode)
 	}
 	r := gin.Default()
+	
+	// Debug middleware to monitor incoming requests from Android devices
+	r.Use(func(c *gin.Context) {
+		startTime := time.Now()
+		log.Printf("[DOCKER-DEBUG] ===> INCOMING: %s %s from IP: %s (UA: %s)",
+			c.Request.Method, c.Request.URL.Path, c.ClientIP(), c.Request.UserAgent())
+		c.Next()
+		latency := time.Since(startTime)
+		log.Printf("[DOCKER-DEBUG] <=== RESPONSE: %d | Duration: %v", c.Writer.Status(), latency)
+	})
 
 	// Healthcheck route
 	r.GET("/health", func(c *gin.Context) {
@@ -110,6 +126,16 @@ func main() {
 			oauth.POST("/device/confirm", handler.DeviceConfirmHandler)
 			oauth.POST("/token", handler.DeviceTokenHandler)
 		}
+
+		// EMQX HTTP Auth & ACL Integration endpoints
+		mqtt := v1.Group("/mqtt")
+		{
+			mqtt.POST("/auth", handler.MqttAuthHandler)
+			mqtt.POST("/acl", handler.MqttAclHandler)
+		}
+
+		// Device Management
+		v1.DELETE("/devices/:mac", handler.DeviceUnpairHandler)
 	}
 
 	port := os.Getenv("PORT")

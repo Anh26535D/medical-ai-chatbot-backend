@@ -49,6 +49,11 @@ func (m *MockDatabase) GetDevice(ctx context.Context, mac string) (*model.Device
 	return args.Get(0).(*model.Device), args.Error(1)
 }
 
+func (m *MockDatabase) DeleteDevice(ctx context.Context, mac string) error {
+	args := m.Called(ctx, mac)
+	return args.Error(0)
+}
+
 func (m *MockDatabase) UpdateTelemetryHistory(ctx context.Context, mac string, date string, hour int, point model.TelemetryDataPoint) error {
 	args := m.Called(ctx, mac, date, hour, point)
 	return args.Error(0)
