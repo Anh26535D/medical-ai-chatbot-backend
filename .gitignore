@@ -1,5 +1,7 @@
 .env
 firebase-adminsdk.json
+google-services.json
+
 
 
 # Go binaries
