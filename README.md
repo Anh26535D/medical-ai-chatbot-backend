@@ -68,12 +68,23 @@ EMQX's env-var overrides (`EMQX_AUTHENTICATION__1__BODY__*`, `EMQX_AUTHORIZATION
 
 If you ever need to reconfigure this, don't fight the env-var path — set it via the EMQX REST API instead (this persists in the `emqx_data` volume across restarts):
 ```bash
+# Login to EMQX to retrieve Bearer Token
 TOKEN=$(curl -s -X POST http://localhost:18083/api/v5/login -H "Content-Type: application/json" -d '{"username":"admin","password":"public"}' | jq -r .token)
-curl -X PUT http://localhost:18083/api/v5/authentication/password_based:http -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{
+
+# Configure HTTP Authentication Webhook
+curl -s -X PUT http://localhost:18083/api/v5/authentication/password_based:http -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{
   "mechanism": "password_based", "backend": "http", "method": "post",
   "url": "http://app:8080/api/v1/mqtt/auth",
   "headers": {"content-type": "application/json"},
   "body": {"clientid": "${clientid}", "username": "${username}", "password": "${password}"}
+}'
+
+# Configure HTTP Authorization (ACL) Webhook
+curl -s -X PUT http://localhost:18083/api/v5/authorization/sources/http -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{
+  "type": "http", "method": "post",
+  "url": "http://app:8080/api/v1/mqtt/acl",
+  "headers": {"content-type": "application/json"},
+  "body": {"clientid": "${clientid}", "username": "${username}", "topic": "${topic}", "action": "${action}"}
 }'
 ```
 (Same idea for `/api/v5/authorization/sources/http` with `topic`/`action` in the body.) You can verify what EMQX actually resolved with `GET /api/v5/authentication`.
