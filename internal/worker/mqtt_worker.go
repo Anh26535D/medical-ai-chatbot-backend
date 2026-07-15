@@ -5,6 +5,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"medical-iot-backend/internal/handler"
@@ -99,6 +100,7 @@ func handleTelemetryMessage(ctx context.Context, msg mqtt.Message) {
 		return
 	}
 
+
 	status := evaluateStatus(bpm, spo2, temp)
 	now := time.Now()
 
@@ -114,7 +116,7 @@ func handleTelemetryMessage(ctx context.Context, msg mqtt.Message) {
 	date := now.Format("2006-01-02")
 	hour := now.Hour()
 
-	// Update in MongoDB hourly bucket
+	// Update in MongoDB hourly bucket (Always save every raw point for clinical accuracy in historical records)
 	err := repository.DB.UpdateTelemetryHistory(ctx, mac, date, hour, point)
 	if err != nil {
 		log.Printf("[MQTT Worker] Failed to update telemetry bucket in MongoDB for device %s: %v", mac, err)
@@ -129,11 +131,67 @@ func handleTelemetryMessage(ctx context.Context, msg mqtt.Message) {
 		if err != nil || device == nil {
 			log.Printf("[MQTT Worker] Device %s not found in MongoDB, skipping Firebase update", mac)
 		} else {
-			if err := repository.Firebase.UpdateLiveTelemetry(ctx, device.OwnerUID, mac, point); err != nil {
-				log.Printf("[MQTT Worker] Failed to update live telemetry in Firebase for device %s: %v", mac, err)
+			// Throttle and threshold logic for Firebase writes to optimize network and backend resources
+			shouldUpdateFirebase := false
+			
+			lastSentMutex.Lock()
+			lastSent, exists := lastSentTelemetry[mac]
+			if !exists {
+				shouldUpdateFirebase = true
 			} else {
-				log.Printf("[MQTT Worker] Updated live telemetry in Firebase at users/%s/devices/%s/telemetry/latest", device.OwnerUID, mac)
+				// 1. Time-based throttle check: force update if >= 3 seconds have passed
+				timeDiff := now.Sub(lastSent.Time)
+				if timeDiff >= 3*time.Second {
+					shouldUpdateFirebase = true
+				} else {
+					// 2. Threshold-based check: update if heart rate changed >= 2, temp >= 0.1, or SpO2 changed
+					bpmDiff := bpm - lastSent.BPM
+					if bpmDiff < 0 {
+						bpmDiff = -bpmDiff
+					}
+					tempDiff := temp - lastSent.Temp
+					if tempDiff < 0 {
+						tempDiff = -tempDiff
+					}
+					
+					if bpmDiff >= 2 || spo2 != lastSent.SPO2 || tempDiff >= 0.1 {
+						shouldUpdateFirebase = true
+					}
+				}
+			}
+			
+			if shouldUpdateFirebase {
+				lastSentTelemetry[mac] = LastSentCache{
+					Time: now,
+					BPM:  bpm,
+					SPO2: spo2,
+					Temp: temp,
+				}
+				lastSentMutex.Unlock()
+				
+				if err := repository.Firebase.UpdateLiveTelemetry(ctx, device.OwnerUID, mac, point); err != nil {
+					log.Printf("[MQTT Worker] Failed to update live telemetry in Firebase for device %s: %v", mac, err)
+				} else {
+					log.Printf("[MQTT Worker] Updated live telemetry in Firebase at users/%s/devices/%s/telemetry/latest", device.OwnerUID, mac)
+				}
+			} else {
+				lastSentMutex.Unlock()
+				log.Printf("[MQTT Worker] Skipped Firebase write for device %s due to Throttling/Threshold limits", mac)
 			}
 		}
 	}
 }
+
+// In-memory cache for throttling
+type LastSentCache struct {
+	Time time.Time
+	BPM  int
+	SPO2 int
+	Temp float64
+}
+
+var (
+	lastSentTelemetry = make(map[string]LastSentCache)
+	lastSentMutex     sync.Mutex
+)
+
