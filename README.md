@@ -16,7 +16,8 @@ This is a high-performance, production-ready Golang backend built using the **Gi
 │   ├── repository/
 │   │   ├── database.go         # MongoDB & Redis concrete implementations
 │   │   ├── database_test.go    # MongoDB mtest database tests
-│   │   └── firebase.go         # Real-time Firebase RTDB integrations
+│   │   ├── firebase.go         # Real-time Firebase RTDB integrations
+│   │   └── emqx.go             # EMQX Management API client (kick MQTT sessions on unpair)
 │   ├── handler/
 │   │   ├── auth.go             # Register & Login REST handlers
 │   │   ├── auth_test.go        # Unit tests for authentication handlers
@@ -89,6 +90,46 @@ curl -s -X PUT http://localhost:18083/api/v5/authorization/sources/http -H "Auth
 ```
 (Same idea for `/api/v5/authorization/sources/http` with `topic`/`action` in the body.) You can verify what EMQX actually resolved with `GET /api/v5/authentication`.
 
+### 🔌 EMQX Management API (immediate session revocation on unpair)
+
+An MQTT client that is already connected keeps publishing regardless of whether its backend
+authorization record still exists — EMQX only re-checks the HTTP Auth webhook at `CONNECT`
+time, not on every subsequent packet. So deleting a device's MongoDB row on unpair does
+**not**, by itself, stop an already-connected device from continuing to send data; it only
+blocks the device the *next* time its session happens to drop and it tries to reconnect,
+which could be an unbounded amount of time later. `DeviceUnpairHandler` closes this gap by
+also calling EMQX's Management API to forcibly disconnect (`kick`) the device's live session
+by client ID (`clientid` = the device's MAC address) right when unpairing happens.
+
+This is a **separate credential** from the MQTT auth/ACL webhooks above — those authenticate
+*devices*; this authenticates the *backend itself* as an EMQX administrator. It is not
+configurable via `docker-compose.yml` env vars (`EMQX_DASHBOARD__DEFAULT_USERNAME`/`PASSWORD`
+only sets the initial dashboard login, and dashboard sessions expire); instead it's a
+long-lived API Key/Secret pair, created once through the Dashboard API itself:
+
+```bash
+# 1. Create a dashboard user (one-time, inside the EMQX container)
+docker exec medical_iot_emqx emqx ctl admins add iot_backend_svc '<password>' 'Backend Management API service account'
+
+# 2. Log in as that user to get a short-lived Bearer token
+TOKEN=$(curl -s -X POST http://localhost:18083/api/v5/login -H "Content-Type: application/json" \
+  -d '{"username":"iot_backend_svc","password":"<password>"}' | jq -r .token)
+
+# 3. Use that token once to mint a persistent API key/secret (does not expire, survives EMQX restarts - it's stored in the emqx_data volume, not tied to the dashboard session)
+curl -s -X POST http://localhost:18083/api/v5/api_key -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"iot-backend-unpair-kick","expired_at":"infinity","desc":"Kick MQTT client on device unpair","enable":true}'
+```
+
+The resulting `api_key`/`api_secret` go into `EMQX_API_KEY`/`EMQX_API_SECRET` (see `.env.example`),
+used as HTTP Basic Auth credentials by `internal/repository/emqx.go`'s `KickClient()`. If these
+env vars are unset, `KickClient` fails closed with an error (logged, not fatal) — unpairing
+still works, it just falls back to the slower "wait for the session to drop on its own" path.
+
+Either way, the pairing check added to `handleTelemetryMessage` (see below) is a second,
+independent line of defense: even in the brief window between the kick and the session
+actually closing, an unpaired device's telemetry is discarded before it reaches MongoDB or
+Firebase, not just hidden from the live view.
+
 ---
 
 ## 🧪 Testing
@@ -125,10 +166,11 @@ powershell -ExecutionPolicy Bypass -File .\test_flow.ps1
 
 ### 📡 EMQX HTTP Auth/ACL Webhooks (internal — called by EMQX, not clients)
 - **`POST /api/v1/mqtt/auth`**: Called by EMQX on every MQTT `CONNECT`. Receives `{clientid, username, password}`. For real devices, `clientid`/`username` is the MAC and `password` is the device's access token, checked against MongoDB. The backend's own MQTT worker authenticates here too, via a separate shared-secret identity (`MQTTWorkerClientID`/`MQTTWorkerSecret`, env `MQTT_WORKER_SECRET`) rather than a per-device token lookup.
-- **`POST /api/v1/mqtt/acl`**: Called by EMQX on every `PUBLISH`/`SUBSCRIBE`. Devices may only publish to their own `devices/{mac}/telemetry`; the backend's MQTT worker identity may subscribe to the wildcard `devices/+/telemetry`.
+- **`POST /api/v1/mqtt/acl`**: Called by EMQX on every `PUBLISH`/`SUBSCRIBE`. Devices may only publish to their own `devices/{mac}/telemetry` and `devices/{mac}/status` (the latter carries the online/offline heartbeat and the LWT payload EMQX auto-publishes when a device drops), and may only subscribe to their own `devices/{mac}/command`; the backend's MQTT worker identity may subscribe to both `devices/+/telemetry` and `devices/+/status`, and may publish to any `devices/{mac}/command` topic (used by `DeviceRequestReconfigHandler`, see below — devices never publish to their own command topic themselves, they only subscribe).
 
 ### 📴 Device Management
-- **`DELETE /api/v1/devices/{mac}`**: Unpairs a device (Bearer JWT required) — removes it from MongoDB and clears its Firebase ownership mapping, forcing it to re-run the device flow to reconnect.
+- **`DELETE /api/v1/devices/{mac}`**: Unpairs a device (Bearer JWT required) — removes it from MongoDB, clears its Firebase ownership mapping, and kicks its live MQTT session via the EMQX Management API (see below) so the revoked access token takes effect immediately rather than whenever the session next happens to drop on its own.
+- **`POST /api/v1/devices/{mac}/request-reconfig`**: Remotely asks an already-paired, already-online device to reopen BLE provisioning, without needing physical access to its RST button. Bearer JWT required; the handler verifies the caller's `uid_user` matches the device's `OwnerUID` in MongoDB before doing anything. On success it publishes `{"cmd":"open_provisioning"}` to `devices/{mac}/command` via the backend's own MQTT worker connection (`worker.PublishCommand`, see `internal/worker/mqtt_worker.go`); the firmware's `onMqttCommand()` callback receives it, sets the same `need_new_net` NVS flag the RST button would set, and reboots into BLE provisioning mode (`FREE_BLE` — the same on-demand BLE used everywhere else, see the firmware's provisioning design below). Returns `503` if the worker isn't currently connected to the broker (this is a best-effort nudge, not a queued/guaranteed command — if the device is offline the request simply fails rather than being held for later delivery).
 
 ---
 
@@ -140,12 +182,13 @@ Note: this connection goes through the same `ConnectRetry`-driven retry loop as 
 
 When it receives raw plain-text payload containing 4 compressed fields, e.g., `bpm,spo2,temp,hum` (e.g., `"75,98,32.5,65.0"`):
 1. **Parses 4 fields**: BPM (`75`), SPO2 (`98`), Temperature (`32.5`), Humidity (`65.0`).
-2. **Evaluates Clinical Status**: Determines status (`Normal` or `Warning`). A `Warning` status is triggered if:
+2. **Checks pairing status first**: looks up the device by MAC in MongoDB *before* persisting anything. If it isn't found (unpaired), the message is discarded here — logged and dropped, nothing is written to MongoDB or Firebase. This matters because EMQX only re-checks `/api/v1/mqtt/auth` at `CONNECT` time, not per-publish, so an already-connected device can keep publishing for a short window after being unpaired (see `DeviceUnpairHandler`'s EMQX kick above, which closes most but not all of that window) — this check is what stops that leftover telemetry from being recorded anywhere, not just hidden from the live view.
+3. **Evaluates Clinical Status**: Determines status (`Normal` or `Warning`). A `Warning` status is triggered if:
    - BPM is outside the range 60-100.
    - SPO2 is below 95%.
    - **Temperature exceeds the alert threshold of 39.0°C**.
-3. **Persists to MongoDB**: Upserts and appends data inside MongoDB using an **Hourly Bucket Pattern** (`{mac_address}_{date}_{hour}`) via `$push` and `$setOnInsert`.
-4. **Real-time Firebase Update**: Looks up the device's `OwnerUID` in MongoDB, then updates the Realtime Database at `users/{ownerUID}/devices/{mac}/telemetry/latest`.
+4. **Persists to MongoDB**: Upserts and appends data inside MongoDB using an **Hourly Bucket Pattern** (`{mac_address}_{date}_{hour}`) via `$push` and `$setOnInsert`.
+5. **Real-time Firebase Update**: Uses the device's `OwnerUID` (already looked up in step 2) to update the Realtime Database at `users/{ownerUID}/devices/{mac}/telemetry/latest`, still subject to its own throttle/threshold check (see below).
 
 ---
 
