@@ -24,19 +24,6 @@ var JWTSecret = func() []byte {
 	return []byte(secret)
 }()
 
-// MQTTWorkerClientID identifies the backend's own MQTT client (see worker.StartMQTTWorker),
-// which subscribes to devices/+/telemetry and must authenticate/authorize like any other
-// EMQX client via the HTTP auth/ACL webhooks below, but has no per-device token in MongoDB.
-const MQTTWorkerClientID = "medical_iot_backend_worker"
-
-var MQTTWorkerSecret = func() string {
-	secret := os.Getenv("MQTT_WORKER_SECRET")
-	if secret == "" {
-		return "insecure-default-worker-secret-change-me"
-	}
-	return secret
-}()
-
 type Claims struct {
 	UIDUser string `json:"uid_user"`
 	jwt.RegisteredClaims

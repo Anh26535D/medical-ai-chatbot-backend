@@ -142,6 +142,45 @@ func (fc *FirebaseClient) UpdateLiveTelemetry(ctx context.Context, ownerUID stri
 	return nil
 }
 
+// UpdateDeviceStatus updates the online/offline connection state at users/{uid}/devices/{mac}/status.json
+func (fc *FirebaseClient) UpdateDeviceStatus(ctx context.Context, ownerUID string, mac string, isOnline bool) error {
+	if fc == nil || fc.DatabaseURL == "" {
+		return fmt.Errorf("firebase client not initialized")
+	}
+	url := fmt.Sprintf("%s/users/%s/devices/%s/status.json", fc.DatabaseURL, ownerUID, mac)
+	token, err := fc.getAccessToken(ctx)
+	if err == nil && token != "" {
+		url = fmt.Sprintf("%s?access_token=%s", url, token)
+	}
+
+	statusMap := map[string]interface{}{
+		"online":    isOnline,
+		"last_seen": time.Now().Unix(),
+	}
+
+	data, err := json.Marshal(statusMap)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "PUT", url, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := fc.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("failed to write status to firebase: status code %d", resp.StatusCode)
+	}
+	return nil
+}
+
 // UpdateProvisioningStatus updates the pairing credentials/flow information for polling.
 func (fc *FirebaseClient) UpdateProvisioningStatus(ctx context.Context, mac string, sessionId string, userCode string, pairingNonce string) error {
 	if fc == nil || fc.DatabaseURL == "" {

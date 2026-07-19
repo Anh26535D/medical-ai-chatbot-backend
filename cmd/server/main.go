@@ -76,6 +76,9 @@ func main() {
 	// Initialize Firebase Client
 	repository.InitFirebase()
 
+	// Initialize EMQX Management API client (used to kick a device's MQTT session on unpair)
+	repository.InitEMQX()
+
 	// 3. Start MQTT worker in background
 	mqttBroker := os.Getenv("MQTT_BROKER_URI")
 	if mqttBroker == "" {
@@ -136,6 +139,7 @@ func main() {
 
 		// Device Management
 		v1.DELETE("/devices/:mac", handler.DeviceUnpairHandler)
+		v1.POST("/devices/:mac/request-reconfig", handler.DeviceRequestReconfigHandler)
 	}
 
 	port := os.Getenv("PORT")

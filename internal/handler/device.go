@@ -15,6 +15,7 @@ import (
 
 	"medical-iot-backend/internal/model"
 	"medical-iot-backend/internal/repository"
+	"medical-iot-backend/internal/worker"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -267,8 +268,8 @@ func MqttAuthHandler(c *gin.Context) {
 
 	// The backend's own MQTT worker isn't a paired device, so it authenticates via a
 	// shared secret instead of a per-device token lookup in MongoDB.
-	if mac == MQTTWorkerClientID {
-		if token == MQTTWorkerSecret {
+	if mac == repository.MQTTWorkerClientID {
+		if token == repository.MQTTWorkerSecret {
 			c.JSON(http.StatusOK, gin.H{"result": "allow"})
 		} else {
 			c.JSON(http.StatusForbidden, gin.H{"result": "deny", "error": "Invalid worker credentials"})
@@ -310,15 +311,32 @@ func MqttAclHandler(c *gin.Context) {
 		}
 	}
 
-	// Rule: the backend's own MQTT worker may subscribe to the telemetry wildcard topic
-	if payload.ClientID == MQTTWorkerClientID && payload.Access == "subscribe" && payload.Topic == "devices/+/telemetry" {
+	// Rule: the backend's own MQTT worker may subscribe to the telemetry and status wildcard topics
+	if payload.ClientID == repository.MQTTWorkerClientID && payload.Access == "subscribe" &&
+		(payload.Topic == "devices/+/telemetry" || payload.Topic == "devices/+/status") {
 		c.JSON(http.StatusOK, gin.H{"result": "allow"})
 		return
 	}
 
-	// Rule: Device can only publish to "devices/{clientid}/telemetry"
-	expectedTopic := fmt.Sprintf("devices/%s/telemetry", payload.ClientID)
-	if payload.Access == "publish" && payload.Topic == expectedTopic {
+	// Rule: the backend's own MQTT worker may publish to any device's command topic
+	if payload.ClientID == repository.MQTTWorkerClientID && payload.Access == "publish" &&
+		strings.HasPrefix(payload.Topic, "devices/") && strings.HasSuffix(payload.Topic, "/command") {
+		c.JSON(http.StatusOK, gin.H{"result": "allow"})
+		return
+	}
+
+	// Rule: Device can only publish to its own "devices/{clientid}/telemetry" topic and its
+	// own "devices/{clientid}/status" topic (the online heartbeat published right after
+	// connect, and the LWT payload EMQX auto-publishes on behalf of the device when it drops).
+	if payload.Access == "publish" &&
+		(payload.Topic == fmt.Sprintf("devices/%s/telemetry", payload.ClientID) ||
+			payload.Topic == fmt.Sprintf("devices/%s/status", payload.ClientID)) {
+		c.JSON(http.StatusOK, gin.H{"result": "allow"})
+		return
+	}
+
+	// Rule: Device may only subscribe to its own "devices/{clientid}/command" topic
+	if payload.Access == "subscribe" && payload.Topic == fmt.Sprintf("devices/%s/command", payload.ClientID) {
 		c.JSON(http.StatusOK, gin.H{"result": "allow"})
 		return
 	}
@@ -378,5 +396,62 @@ func DeviceUnpairHandler(c *gin.Context) {
 		_ = repository.Firebase.DeleteDeviceOwnership(c.Request.Context(), mac)
 	}
 
+	// 4. Kick the device's live MQTT session (if any) so the revoked access token takes
+	// effect immediately, instead of the device only noticing the next time its session
+	// happens to drop on its own and it tries to reconnect. The device's MQTT ClientID is
+	// its own MAC address (see ESP32 firmware's mqttClient.connect(macAddress, ...)).
+	if repository.EMQX != nil {
+		if err := repository.EMQX.KickClient(c.Request.Context(), mac); err != nil {
+			log.Printf("[Unpair] Failed to kick MQTT session for device %s: %v", mac, err)
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{"message": "Device unpaired successfully"})
+}
+
+// DeviceRequestReconfigHandler lets the owner remotely ask an already-paired device to reopen
+// BLE provisioning (e.g. Wi-Fi needs to change but nobody is physically near the device).
+func DeviceRequestReconfigHandler(c *gin.Context) {
+	authHeader := c.GetHeader("Authorization")
+	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization token required"})
+		return
+	}
+	tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
+
+	claims := &Claims{}
+	token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
+		return JWTSecret, nil
+	})
+	if err != nil || !token.Valid {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
+		return
+	}
+
+	mac := c.Param("mac")
+	if mac == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "MAC address parameter is required"})
+		return
+	}
+
+	device, err := repository.DB.GetDevice(c.Request.Context(), mac)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database lookup failed"})
+		return
+	}
+	if device == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Device not found"})
+		return
+	}
+	if device.OwnerUID != claims.UIDUser {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You do not own this device"})
+		return
+	}
+
+	if err := worker.PublishCommand(mac, `{"cmd":"open_provisioning"}`); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Device is not currently reachable: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Reconfiguration request sent to device"})
 }
