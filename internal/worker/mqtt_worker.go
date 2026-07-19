@@ -28,6 +28,35 @@ func evaluateStatus(bpm, spo2 int, temp float64) string {
 	return "Normal"
 }
 
+// Rolling average window for BPM, keyed by device MAC. The firmware sends every raw
+// per-beat BPM reading unfiltered (demo mode); smoothing now happens here instead of
+// on-device, matching bpmWindowSize to the firmware's old 4-sample rolling window.
+const bpmWindowSize = 4
+
+var (
+	bpmWindows      = make(map[string][]int)
+	bpmWindowsMutex sync.Mutex
+)
+
+// rollingAverageBPM appends bpm to mac's window (evicting the oldest sample once the
+// window is full) and returns the average of the samples currently held.
+func rollingAverageBPM(mac string, bpm int) int {
+	bpmWindowsMutex.Lock()
+	defer bpmWindowsMutex.Unlock()
+
+	window := append(bpmWindows[mac], bpm)
+	if len(window) > bpmWindowSize {
+		window = window[len(window)-bpmWindowSize:]
+	}
+	bpmWindows[mac] = window
+
+	sum := 0
+	for _, v := range window {
+		sum += v
+	}
+	return sum / len(window)
+}
+
 func StartMQTTWorker(ctx context.Context, brokerURI string) {
 	opts := mqtt.NewClientOptions().AddBroker(brokerURI)
 	opts.SetClientID(repository.MQTTWorkerClientID)
@@ -131,16 +160,16 @@ func handleTelemetryMessage(ctx context.Context, msg mqtt.Message) {
 		return
 	}
 
-	status := evaluateStatus(bpm, spo2, temp)
 	now := time.Now()
 
+	// MongoDB keeps the raw, unsmoothed reading for clinical/historical accuracy.
 	point := model.TelemetryDataPoint{
 		Timestamp:   now.Unix(),
 		BPM:         bpm,
 		SPO2:        spo2,
 		Temperature: temp,
 		Humidity:    hum,
-		Status:      status,
+		Status:      evaluateStatus(bpm, spo2, temp),
 	}
 
 	date := now.Format("2006-01-02")
@@ -152,6 +181,13 @@ func handleTelemetryMessage(ctx context.Context, msg mqtt.Message) {
 	} else {
 		log.Printf("[MQTT Worker] Saved telemetry data to MongoDB bucket for device %s", mac)
 	}
+
+	// Firebase (live view + Warning/Normal status) uses the smoothed BPM instead - this
+	// replaces the 4-sample rolling average the firmware used to compute on-device.
+	smoothedBpm := rollingAverageBPM(mac, bpm)
+	livePoint := point
+	livePoint.BPM = smoothedBpm
+	livePoint.Status = evaluateStatus(smoothedBpm, spo2, temp)
 
 	// Update in Firebase Realtime Database under users/{ownerUID}/devices/{mac}/telemetry/latest
 	if repository.Firebase != nil {
@@ -169,7 +205,7 @@ func handleTelemetryMessage(ctx context.Context, msg mqtt.Message) {
 				shouldUpdateFirebase = true
 			} else {
 				// 2. Threshold-based check: update if heart rate changed >= 2, temp >= 0.1, or SpO2 changed
-				bpmDiff := bpm - lastSent.BPM
+				bpmDiff := smoothedBpm - lastSent.BPM
 				if bpmDiff < 0 {
 					bpmDiff = -bpmDiff
 				}
@@ -187,13 +223,13 @@ func handleTelemetryMessage(ctx context.Context, msg mqtt.Message) {
 		if shouldUpdateFirebase {
 			lastSentTelemetry[mac] = LastSentCache{
 				Time: now,
-				BPM:  bpm,
+				BPM:  smoothedBpm,
 				SPO2: spo2,
 				Temp: temp,
 			}
 			lastSentMutex.Unlock()
 
-			if err := repository.Firebase.UpdateLiveTelemetry(ctx, device.OwnerUID, mac, point); err != nil {
+			if err := repository.Firebase.UpdateLiveTelemetry(ctx, device.OwnerUID, mac, livePoint); err != nil {
 				log.Printf("[MQTT Worker] Failed to update live telemetry in Firebase for device %s: %v", mac, err)
 			} else {
 				log.Printf("[MQTT Worker] Updated live telemetry in Firebase at users/%s/devices/%s/telemetry/latest", device.OwnerUID, mac)

@@ -183,12 +183,9 @@ Note: this connection goes through the same `ConnectRetry`-driven retry loop as 
 When it receives raw plain-text payload containing 4 compressed fields, e.g., `bpm,spo2,temp,hum` (e.g., `"75,98,32.5,65.0"`):
 1. **Parses 4 fields**: BPM (`75`), SPO2 (`98`), Temperature (`32.5`), Humidity (`65.0`).
 2. **Checks pairing status first**: looks up the device by MAC in MongoDB *before* persisting anything. If it isn't found (unpaired), the message is discarded here — logged and dropped, nothing is written to MongoDB or Firebase. This matters because EMQX only re-checks `/api/v1/mqtt/auth` at `CONNECT` time, not per-publish, so an already-connected device can keep publishing for a short window after being unpaired (see `DeviceUnpairHandler`'s EMQX kick above, which closes most but not all of that window) — this check is what stops that leftover telemetry from being recorded anywhere, not just hidden from the live view.
-3. **Evaluates Clinical Status**: Determines status (`Normal` or `Warning`). A `Warning` status is triggered if:
-   - BPM is outside the range 60-100.
-   - SPO2 is below 95%.
-   - **Temperature exceeds the alert threshold of 39.0°C**.
-4. **Persists to MongoDB**: Upserts and appends data inside MongoDB using an **Hourly Bucket Pattern** (`{mac_address}_{date}_{hour}`) via `$push` and `$setOnInsert`.
-5. **Real-time Firebase Update**: Uses the device's `OwnerUID` (already looked up in step 2) to update the Realtime Database at `users/{ownerUID}/devices/{mac}/telemetry/latest`, still subject to its own throttle/threshold check (see below).
+3. **Persists raw to MongoDB**: Evaluates clinical status (`Normal`/`Warning`, see thresholds below) from the *raw* BPM as received, then upserts/appends into MongoDB using an **Hourly Bucket Pattern** (`{mac_address}_{date}_{hour}`) via `$push` and `$setOnInsert` — this is the historical record, kept unsmoothed for clinical accuracy.
+4. **Smooths BPM for the live view**: The firmware sends every raw per-beat BPM reading unfiltered (no on-device averaging or physiological range filtering — this is a demo simplification, see `iot-firmware`). `rollingAverageBPM()` maintains a small in-memory 4-sample rolling window per device MAC and returns the smoothed value, which is what actually goes to Firebase and what clinical status (`Normal`/`Warning`) is evaluated against for the live view — a `Warning` is triggered if smoothed BPM is outside 60-100, SPO2 is below 95%, or temperature exceeds 39.0°C.
+5. **Real-time Firebase Update**: Uses the device's `OwnerUID` (already looked up in step 2) to update the Realtime Database at `users/{ownerUID}/devices/{mac}/telemetry/latest` with the smoothed reading, still subject to its own throttle/threshold check (see below) — which also compares against the smoothed BPM, not the raw one.
 
 ---
 
